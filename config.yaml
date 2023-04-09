@@ -10,7 +10,7 @@ video:
 
     # Imagen en disco
     # (usar reconocedor_automatico.py)
-    fuente: './assets/patentes.mp4'
+    fuente: './assets/todas_las_patentes.mp4'
 
     # Cada cuantos Frames hacer inferencia
     # No se aplica si --demo
@@ -29,7 +29,7 @@ modelo:
     # Se queda solo con aquellas patentes
     # cuyo promedio de las probabilidades de
     # los caracteres es mayor a 0.4
-    confianza_avg_ocr: 0.40
+    confianza_avg_ocr: 0.60
 
     # Si algun caracter esta por debajo de
     # confianza_low_ocr, se descarta

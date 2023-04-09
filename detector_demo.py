@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 
 
 def main_demo(args):
+    print("Args: ", args)
     input_size = args.input_size
     video_path = args.video_source
     weights_path = f'./alpr/models/detection/tf-yolo_tiny_v4-{input_size}x{input_size}-custom-anchors/'

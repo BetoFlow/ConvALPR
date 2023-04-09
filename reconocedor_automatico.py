@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 # Mostrar solo errores de TensorFlow
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
@@ -62,8 +63,22 @@ def main_demo(cfg, demo=True, benchmark=True, save_vid=False):
         else:
             if frame_id % intervalo_reconocimiento == 0:
                 start = timer()
-                alpr.predict(frame)
+                patentes = alpr.predict(frame)
                 total_time = timer() - start
+                # time when the frame was read
+                # print(f'Frame: {frame_id} Time: {cap.get(cv2.CAP_PROP_POS_MSEC)}')
+                # current date and time:
+                # print("now =", datetime.now())
+                # if there are plates detected log them and save the image as png, also create a csv with the results
+                if patentes:
+                    logger.info(f'Time: {cap.get(cv2.CAP_PROP_POS_MSEC)} \t Patentes detectadas: {patentes}')
+                    cv2.imwrite(f'./alpr-results/{frame_id}.png', frame)
+                    # if patentes has more than one plate, we need to split them
+                    patentesTxt = patentes[0]
+                    if len(patentes) > 1:
+                        patentesTxt = ' - '.join(patentes)
+                    with open('alpr-results.csv', 'a') as f:
+                        f.write(f'{datetime.now()}, {frame_id}, {patentesTxt}\n')
                 if benchmark:
                     display_bench = f'ms: {total_time:.4f} FPS: {1 / total_time:.0f}'
                     print(display_bench, flush=True)
