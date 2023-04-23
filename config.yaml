@@ -10,8 +10,8 @@ video:
 
     # Imagen en disco
     # (usar reconocedor_automatico.py)
-    fuente: 'rtsp://201.177.113.155:8080/h264_ulaw.sdp'
-    #fuente: './assets/todas_las_patentes.mp4'
+    # fuente: 'rtsp://201.177.113.155:8080/h264_ulaw.sdp'
+    fuente: './assets/FHD0004.mov'
 
     # Cada cuantos Frames hacer inferencia
     # No se aplica si --demo

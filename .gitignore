@@ -2,3 +2,5 @@
 db/plates.db
 alpr/__pycache__/
 env/
+assets/
+alpr-results/

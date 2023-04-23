@@ -21,6 +21,7 @@ logger.setLevel(logging.INFO)
 
 
 def main_demo(cfg, demo=True, benchmark=True, save_vid=False):
+    last_seen_patentes = []
     alpr = ALPR(cfg['modelo'], cfg['db'])
     video_path = cfg['video']['fuente']
     cap = cv2.VideoCapture(video_path)
@@ -45,9 +46,9 @@ def main_demo(cfg, demo=True, benchmark=True, save_vid=False):
         else:
             # Descomenten esto para camara IP Esto es por si el stream deja de transmitir algún
             # frame o se tarda más de lo normal. En este caso simplemente volvemos a intentar leer el frame.
-            vid = cv2.VideoCapture(video_path)
+            cap = cv2.VideoCapture(video_path)
             continue
-            break
+            # break
         if demo:
             frame_w_pred, total_time = alpr.mostrar_predicts(
                 frame)
@@ -69,21 +70,30 @@ def main_demo(cfg, demo=True, benchmark=True, save_vid=False):
                 start = timer()
                 patentes = alpr.predict(frame)
                 total_time = timer() - start
+
+
                 # time when the frame was read
                 # print(f'Frame: {frame_id} Time: {cap.get(cv2.CAP_PROP_POS_MSEC)}')
                 # current date and time:
                 # print("now =", datetime.now())
                 # if there are plates detected log them and save the image as png, also create a csv with the results
                 if patentes:
+                    aux_patentes = patentes.copy()
+                    # if some plates were detected in the last frame, check if they are the same
+                    if last_seen_patentes:
+                        # if some patente in patentes is in last_seen_patentes, remove it
+                        for patente in patentes:
+                            if patente in last_seen_patentes:
+                                patentes.remove(patente)
+
                     time = datetime.now(tz)
                     logger.info(f'Time: {time} \t Patentes detectadas: {patentes}')
-                    cv2.imwrite(f'./alpr-results/{start}.png', frame)
-                    # if patentes has more than one plate, we need to split them
-                    patentesTxt = patentes[0]
-                    if len(patentes) > 1:
-                        patentesTxt = ' - '.join(patentes)
-                    with open('alpr-results.csv', 'a') as f:
-                        f.write(f'{time}, {start}, {patentesTxt}\n')
+                    
+                    for patente in patentes:
+                        with open('alpr-results.csv', 'a') as f:
+                            f.write(f'{time}, {start}, {patente}\n')
+                        cv2.imwrite(f'./alpr-results/{start}.png', frame)
+                    last_seen_patentes = aux_patentes.copy()
                 if benchmark:
                     display_bench = f'ms: {total_time:.4f} FPS: {1 / total_time:.0f}'
                     print(display_bench, flush=True)
