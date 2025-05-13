@@ -70,6 +70,15 @@
                 <input type="text" id="stream_url" name="stream_url" required size="70">
             </p>
             <p>
+                <label for="stream_role">Camera Role:</label><br>
+                <select id="stream_role" name="stream_role" required>
+                    <option value="common">Common (Entry & Exit)</option>
+                    <option value="entry">Entry Only</option>
+                    <option value="exit">Exit Only</option>
+                    <option value="monitoring">Monitoring (Inside Parking)</option>
+                </select>
+            </p>
+            <p>
                 <input type="submit" value="Add Stream">
             </p>
         </form>
@@ -78,7 +87,7 @@
             <ul>
             {% for config in stream_configs %}
                 <li>
-                    <strong>{{ config.name }}</strong>: {{ config.url }}
+                    <strong>{{ config.name }}</strong> (Role: {{ config.role|default('N/A') }}): {{ config.url }}
                     <form method="POST" action="{{ url_for('delete_stream', stream_id=config._id|string) }}" style="display: inline; margin-left: 10px;">
                         <input type="submit" value="Delete" onclick="return confirm('Are you sure you want to delete this stream?');">
                     </form>
@@ -95,8 +104,58 @@
         <p class="error">{{ error_message }}</p>
     {% endif %}
 
-    <h2 style="text-align: center; margin-top: 30px;">Detection Log</h2>
-    {% if detections %}
+    <h2 style="text-align: center; margin-top: 30px;">Parking Sessions</h2>
+    {% if parking_sessions and parking_sessions|length > 0 %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Plate Number</th>
+                    <th>Status</th>
+                    <th>Entry Time</th>
+                    <th>Entry Camera</th>
+                    <th>Entry Image</th>
+                    <th>Exit Time</th>
+                    <th>Exit Camera</th>
+                    <th>Exit Image</th>
+                    <th>Duration</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for session in parking_sessions %}
+                <tr>
+                    <td>{{ session.plate_number }}</td>
+                    <td>{{ session.status|capitalize }}</td>
+                    <td>{{ session.entry_timestamp.strftime('%Y-%m-%d %H:%M:%S') if session.entry_timestamp else 'N/A' }}</td>
+                    <td>{{ session.entry_camera_id|default('N/A') }}</td>
+                    <td>
+                        {% if session.entry_image_url %}
+                            <img src="{{ session.entry_image_url }}" alt="Entry Image">
+                        {% else %}
+                            No Image
+                        {% endif %}
+                    </td>
+                    <td>{{ session.exit_timestamp.strftime('%Y-%m-%d %H:%M:%S') if session.exit_timestamp else 'N/A' }}</td>
+                    <td>{{ session.exit_camera_id|default('N/A') }}</td>
+                    <td>
+                        {% if session.exit_image_url %}
+                            <img src="{{ session.exit_image_url }}" alt="Exit Image">
+                        {% else %}
+                            No Image
+                        {% endif %}
+                    </td>
+                    <td>{{ session.duration_str }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    {% elif not error_message %} {# Assuming error_message would be set if parking_sessions_collection is None #}
+        <p class="no-detections">No parking sessions found.</p>
+    {% endif %}
+
+    <hr style="margin-top: 40px; margin-bottom: 30px;">
+
+    <h2 style="text-align: center;">Raw Detection Log (Last 50)</h2>
+    {% if detections and detections|length > 0 %}
         <table>
             <thead>
                 <tr>
@@ -108,15 +167,15 @@
                 </tr>
             </thead>
             <tbody>
-                {% for detection in detections %}
+                {% for detection_doc in detections %} {# Changed loop variable name #}
                 <tr>
-                    <td>{{ detection.timestamp.strftime('%Y-%m-%d %H:%M:%S') if detection.timestamp else 'N/A' }}</td>
-                    <td>{{ detection.plate_number if detection.plate_number else 'N/A' }}</td>
-                    <td>{{ "%.2f"|format(detection.confidence) if detection.confidence else 'N/A' }}%</td>
-                    <td>{{ detection.camera_id if detection.camera_id else 'N/A' }}</td>
+                    <td>{{ detection_doc.timestamp.strftime('%Y-%m-%d %H:%M:%S') if detection_doc.timestamp else 'N/A' }}</td>
+                    <td>{{ detection_doc.plate_number if detection_doc.plate_number else 'N/A' }}</td>
+                    <td>{{ "%.2f"|format(detection_doc.confidence) if detection_doc.confidence else 'N/A' }}%</td>
+                    <td>{{ detection_doc.camera_id if detection_doc.camera_id else 'N/A' }}</td>
                     <td>
-                        {% if detection.image_url %}
-                            <img src="{{ detection.image_url }}" alt="Detection Image">
+                        {% if detection_doc.image_url %}
+                            <img src="{{ detection_doc.image_url }}" alt="Detection Image">
                         {% else %}
                             No Image
                         {% endif %}

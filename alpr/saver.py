@@ -15,7 +15,9 @@ class MongoSaver:
     Handles saving detection information to a MongoDB database.
     """
 
-    def __init__(self, mongo_uri: str, db_name: str = 'anpr_db', collection_name: str = 'detections', frequency_insert: int = 10):
+    def __init__(self, mongo_uri: str, db_name: str = 'anpr_db', 
+                 collection_name: str = 'detections', frequency_insert: int = 10,
+                 log_raw_detections: bool = True): # Added log_raw_detections
         """
         mongo_uri: The MongoDB connection string.
         db_name: Name of the database.
@@ -26,10 +28,15 @@ class MongoSaver:
         self.db_name = db_name
         self.collection_name = collection_name
         self.frequency_insert = frequency_insert
+        self.log_raw_detections = log_raw_detections # Store the flag
         self.records_batch = []
         self.client = None
         self.db = None
-        self.collection = None
+        self.collection = None # This is for the raw detections collection
+
+        if not self.log_raw_detections:
+            logger.info("Raw detection logging is disabled. MongoSaver will not save to 'detections' collection.")
+            return # Don't initialize client/collection if not logging raw
 
         try:
             self.client = MongoClient(self.mongo_uri)
@@ -55,8 +62,13 @@ class MongoSaver:
             confidence (float): Confidence score of the ANPR detection.
             image_path (str): Path to the saved detection image.
         """
-        if self.collection is None: # Corrected check
-            logger.warning("MongoDB collection not available. Cannot add detection record.")
+        logger.debug(f"MongoSaver.add_detection_record called. log_raw_detections: {self.log_raw_detections}, collection is None: {self.collection is None}")
+        if not self.log_raw_detections:
+            logger.debug("Raw detection logging is off, skipping add_detection_record.")
+            return 
+
+        if self.collection is None: 
+            logger.warning("MongoDB collection for raw detections not available. Cannot add detection record.")
             return
 
         record = {

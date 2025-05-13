@@ -22,6 +22,8 @@ ENV_OCR_AVG_CONFIDENCE = "OCR_AVG_CONFIDENCE_THRESHOLD"
 ENV_OCR_LOW_CONFIDENCE = "OCR_LOW_CONFIDENCE_THRESHOLD"
 ENV_MONGO_INSERT_FREQ = "MONGO_INSERT_FREQUENCY"
 ENV_INFERENCE_FREQUENCY_FRAMES = "INFERENCE_FREQUENCY_FRAMES" # How many frames to skip
+ENV_LOG_RAW_DETECTIONS = "LOG_RAW_DETECTIONS" 
+ENV_PLATE_COOLDOWN_SECONDS = "PLATE_DETECTION_COOLDOWN_SECONDS" # New: For detection debounce
 
 DEFAULT_MONGO_URI = "mongodb://mongodb:27017/anpr_db" # Default if not set, matches docker-compose
 DEFAULT_DETECTOR_INPUT_SIZE = 512
@@ -31,6 +33,8 @@ DEFAULT_OCR_AVG_CONFIDENCE = 0.60
 DEFAULT_OCR_LOW_CONFIDENCE = 0.35
 DEFAULT_MONGO_INSERT_FREQ = 10
 DEFAULT_INFERENCE_FREQUENCY_FRAMES = 30 # Process 1 frame every 30
+DEFAULT_LOG_RAW_DETECTIONS = True 
+DEFAULT_PLATE_COOLDOWN_SECONDS = 300 # New: Default 5 minutes (300 seconds)
 
 # Global ALPR instance (shared by threads, if its methods are thread-safe)
 # MongoSaver part of ALPR should handle concurrent calls to add_detection_record if it uses thread-safe list appends
@@ -49,14 +53,15 @@ def get_env_var(name, default, var_type=str):
     value = os.environ.get(name, default)
     try:
         if var_type == bool: # Special handling for bool
-            return value.lower() in ('true', '1', 't')
+            # Ensure 'value' is a string before calling .lower()
+            return str(value).lower() in ('true', '1', 't')
         return var_type(value)
     except ValueError:
         logger.warning(f"Invalid value for environment variable {name}: '{value}'. Using default: {default}.")
         return default
 
-def process_video_stream(video_source_uri: str, camera_id: str, alpr: ALPR, inference_freq_frames: int):
-    logger.info(f"Thread started for {camera_id} with source: {video_source_uri}")
+def process_video_stream(video_source_uri: str, camera_id: str, camera_role: str, alpr: ALPR, inference_freq_frames: int): # Added camera_role
+    logger.info(f"Thread started for {camera_id} (Role: {camera_role}) with source: {video_source_uri}")
     cap = cv2.VideoCapture(video_source_uri)
     if not cap.isOpened():
         logger.error(f"Failed to open video stream: {video_source_uri} for {camera_id}")
@@ -79,16 +84,22 @@ def process_video_stream(video_source_uri: str, camera_id: str, alpr: ALPR, infe
     while True:
         ret, frame = cap.read()
         if not ret:
-            logger.warning(f"End of stream or error reading frame from {video_source_uri} for {camera_id} (frame_count: {frame_count}). Re-trying connection...")
+            logger.warning(f"Stream {camera_id}: Error reading frame or stream ended (frame_count: {frame_count}). Attempting to reconnect...")
             cap.release()
-            time.sleep(5) # Wait before retrying
-            cap = cv2.VideoCapture(video_source_uri)
-            if not cap.isOpened():
-                logger.error(f"Failed to re-open video stream: {video_source_uri} for {camera_id}. Thread exiting.")
-                break
-            frame_count = 0 # Reset frame count for new capture
-            debug_frame_save_count = 0 # Reset debug save count
-            continue
+            reconnect_delay = 5 # Initial delay in seconds
+            while True: # Indefinite reconnection loop
+                logger.info(f"Stream {camera_id}: Waiting {reconnect_delay}s before attempting to reconnect...")
+                time.sleep(reconnect_delay)
+                cap = cv2.VideoCapture(video_source_uri)
+                if cap.isOpened():
+                    logger.info(f"Stream {camera_id}: Reconnected successfully.")
+                    frame_count = 0 # Reset frame count for new capture
+                    debug_frame_save_count = 0 # Reset debug save count
+                    break # Break from inner reconnection loop, continue outer frame processing loop
+                else:
+                    logger.warning(f"Stream {camera_id}: Reconnect failed. Will retry.")
+                    reconnect_delay = min(reconnect_delay * 2, 300) # Exponential backoff up to 5 minutes (300s)
+            continue # Continue to the next iteration of the main frame reading loop (outer while True)
         
         # Log frame shape for debugging, but not too frequently to avoid spamming logs
         if frame_count % (inference_freq_frames * 5) == 0: # Log shape every 5*inference_freq_frames
@@ -115,9 +126,10 @@ def process_video_stream(video_source_uri: str, camera_id: str, alpr: ALPR, infe
             try:
                 # Assuming frame is BGR from OpenCV, ALPR expects RGB
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                detections = alpr.process_frame(frame_rgb, camera_id)
-                if detections:
-                    logger.info(f"{camera_id} processed frame {frame_count}, found {len(detections)} plates.")
+                detections = alpr.process_frame(frame_rgb, camera_id, camera_role) # Pass camera_role
+                if detections: # process_frame now returns list of processed_plate_info or raw detections based on its internal logic
+                    # This log might need adjustment depending on what process_frame returns with parking logic
+                    logger.info(f"{camera_id} (Role: {camera_role}) processed frame {frame_count}. Result: {len(detections)} items.")
                 # else:
                 #     logger.debug(f"{camera_id} processed frame {frame_count}, no plates found.")
 
@@ -136,7 +148,10 @@ def process_single_video_file(video_path: str, job_id: str, camera_id: str, alpr
     """
     Processes a single uploaded video file.
     """
-    logger.info(f"Processing job {job_id}: video file {video_path} for camera {camera_id}")
+    # For uploaded files, assume a "common" role for now, or make it configurable later if needed.
+    # The parking logic in ALPR.process_frame will handle this role.
+    assumed_role_for_uploaded_video = "common" 
+    logger.info(f"Processing job {job_id}: video file {video_path} for camera {camera_id} (Assumed Role: {assumed_role_for_uploaded_video})")
     
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -160,10 +175,10 @@ def process_single_video_file(video_path: str, job_id: str, camera_id: str, alpr
             if frame_count % inference_freq_frames == 0:
                 try:
                     frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    detections = alpr.process_frame(frame_rgb, camera_id) # Use job_id or a derivative as camera_id
+                    detections = alpr.process_frame(frame_rgb, camera_id, assumed_role_for_uploaded_video) # Pass assumed_role
                     if detections:
                         processed_something = True
-                        logger.info(f"Job {job_id} ({camera_id}): processed frame {frame_count}, found {len(detections)} plates.")
+                        logger.info(f"Job {job_id} ({camera_id}, Role: {assumed_role_for_uploaded_video}): processed frame {frame_count}. Result: {len(detections)} items.")
                 except Exception as e:
                     logger.error(f"Job {job_id} ({camera_id}): Error processing frame: {e}", exc_info=True)
                     video_jobs_coll.update_one(
@@ -252,9 +267,11 @@ def main():
     ocr_low_confidence = get_env_var(ENV_OCR_LOW_CONFIDENCE, DEFAULT_OCR_LOW_CONFIDENCE, float)
     mongo_insert_freq = get_env_var(ENV_MONGO_INSERT_FREQ, DEFAULT_MONGO_INSERT_FREQ, int)
     inference_freq = get_env_var(ENV_INFERENCE_FREQUENCY_FRAMES, DEFAULT_INFERENCE_FREQUENCY_FRAMES, int)
+    log_raw_detections_flag = get_env_var(ENV_LOG_RAW_DETECTIONS, DEFAULT_LOG_RAW_DETECTIONS, bool)
+    plate_cooldown_seconds = get_env_var(ENV_PLATE_COOLDOWN_SECONDS, DEFAULT_PLATE_COOLDOWN_SECONDS, int)
 
     # Initialize MongoDB client and ALPR instance
-    # ALPR class itself handles its Mongo connection for MongoSaver
+    # ALPR class itself handles its Mongo connection for MongoSaver (for raw detections if enabled)
     # But we need a client/db object for the job watcher and stream configs.
     db_name_to_use = get_env_var(ENV_DB_NAME, "anpr_db")
     try:
@@ -270,8 +287,13 @@ def main():
 
 
     logger.info("Initializing ANPR system...")
+    # Pass db_instance to ALPR for parking logic access to other collections
+    # Pass log_raw_detections_flag to control raw logging via MongoSaver
     alpr_instance = ALPR(
-        mongo_uri=mongo_uri,
+        mongo_uri=mongo_uri, # For MongoSaver's own connection (if still used directly or for raw logs)
+        db_instance=db_instance, 
+        log_raw_detections=log_raw_detections_flag,
+        plate_cooldown_seconds=plate_cooldown_seconds, # Pass new param
         detector_input_size=detector_input_size,
         detector_confidence_threshold=detector_confidence,
         ocr_model_number=ocr_model_num,
@@ -280,7 +302,7 @@ def main():
         mongo_insert_frequency=mongo_insert_freq
     )
 
-    if alpr_instance.collection is None: # Corrected check for MongoDB connection
+    if alpr_instance.collection is None and log_raw_detections_flag: # Check MongoSaver's collection only if raw logging is on
         logger.error("Failed to connect to MongoDB. ANPR service will run without database saving.")
         # Decide if service should exit or run without DB. PDR implies DB is crucial.
         # For now, it continues but MongoSaver methods will log warnings.
@@ -299,9 +321,10 @@ def main():
                     if src_uri:
                         # Convert numerical source to int if it's all digits (for USB cams)
                         processed_src_uri = int(src_uri) if src_uri.isdigit() else src_uri
+                        camera_role = stream_config.get("role", "common") # Get role, default to "common"
                         thread = threading.Thread(
                             target=process_video_stream,
-                            args=(processed_src_uri, cam_id, alpr_instance, inference_freq),
+                            args=(processed_src_uri, cam_id, camera_role, alpr_instance, inference_freq), # Pass camera_role
                             name=f"StreamProcessor-{cam_id}"
                         )
                         threads.append(thread)
