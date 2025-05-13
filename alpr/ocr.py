@@ -4,11 +4,13 @@ import cv2
 import numpy as np
 import tensorflow as tf
 
+# Adjusted model paths for Docker environment (remove leading 'alpr/')
+# Assumes the script is run from /app where 'models/' directory is present.
 MODELOS = {
-    1: 'alpr/models/ocr/m1_2.0M_GPU',
-    2: 'alpr/models/ocr/m2_1.5M_GPU',
-    3: 'alpr/models/ocr/m3_1.3M_CPU',
-    4: 'alpr/models/ocr/m4_1.1M_CPU',
+    1: 'models/ocr/m1_2.0M_GPU',
+    2: 'models/ocr/m2_1.5M_GPU',
+    3: 'models/ocr/m3_1.3M_CPU',
+    4: 'models/ocr/m4_1.1M_CPU',
 }
 
 

@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  anpr-service:
+    build:
+      context: .
+      dockerfile: ./anpr/Dockerfile
+    container_name: anpr_service
+    privileged: true # As per PDR, for USB camera access, review for production
+    volumes:
+      - anpr_images:/app/detections
+      # Mount local assets for testing if needed, adjust path accordingly
+      - ./assets:/app/assets 
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      # - VIDEO_SOURCE_1=./assets/todas_las_patentes.mp4 # Stream configs now managed via DB/Web Portal
+      # Define other ANPR parameters here if needed, e.g.:
+      # - DETECTOR_INPUT_SIZE=512
+      # - OCR_MODEL_NUMBER=3
+      # - DB_NAME=anpr_db # Default is anpr_db in service_main.py
+    depends_on:
+      - mongodb
+    networks:
+      - anpr_network
+
+  mongodb:
+    image: mongo:latest
+    container_name: mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - anpr_db_data:/data/db
+    networks:
+      - anpr_network
+
+  mongo-express:
+    image: mongo-express:latest
+    container_name: mongo_express
+    restart: always
+    ports:
+      - "8081:8081"
+    environment:
+      - ME_CONFIG_MONGODB_SERVER=mongodb
+      - ME_CONFIG_MONGODB_PORT=27017
+      # ME_CONFIG_MONGODB_ENABLE_ADMIN=true # if admin user/pass is set for mongo
+      # ME_CONFIG_MONGODB_ADMINUSERNAME=admin # Change in production
+      # ME_CONFIG_MONGODB_ADMINPASSWORD=password # Change in production
+      - ME_CONFIG_BASICAUTH_USERNAME=admin # Change in production
+      - ME_CONFIG_BASICAUTH_PASSWORD=password # Change in production
+    depends_on:
+      - mongodb
+    networks:
+      - anpr_network
+
+  web-portal:
+    build: ./web_portal
+    container_name: web_portal
+    ports:
+      - "5000:5000"
+    volumes:
+      - anpr_images:/app/static/detections
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      - FLASK_APP=app.py
+      - FLASK_RUN_HOST=0.0.0.0
+      - FLASK_DEBUG=1 # Enable Flask debug mode for detailed error messages
+    depends_on:
+      - mongodb
+    networks:
+      - anpr_network
+
+volumes:
+  anpr_db_data:
+  anpr_images:
+
+networks:
+  anpr_network:
+    driver: bridge

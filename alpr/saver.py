@@ -1,61 +1,114 @@
 """
-Logica relacionada con guardar detecciones en una BD.
+Logic related to saving detections to MongoDB.
 """
-import sqlite3
-from pathlib import Path
+import os
+import logging
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, OperationFailure
+from datetime import datetime
 
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-class SqlSaver:
+class MongoSaver:
     """
-    Se encarga de guarda la información en una
-    base de datos local (SQLite)
+    Handles saving detection information to a MongoDB database.
     """
 
-    def __init__(self, frequency_insert: int = 10, db_path: str = "db/plates.db"):
+    def __init__(self, mongo_uri: str, db_name: str = 'anpr_db', collection_name: str = 'detections', frequency_insert: int = 10):
         """
-        frequency_insert:   que tan seguido cantidad de patentes/len(unique_plates)
-                            hacer un insert a la base de datos
+        mongo_uri: The MongoDB connection string.
+        db_name: Name of the database.
+        collection_name: Name of the collection.
+        frequency_insert: How many records to accumulate before inserting into the database.
         """
-        # self.batch_count = 0
-        self.unique_plates = set()
+        self.mongo_uri = mongo_uri
+        self.db_name = db_name
+        self.collection_name = collection_name
         self.frequency_insert = frequency_insert
-        # Creo si no existe la capeta/s
-        db_path = Path(db_path)
-        Path(db_path.parent).mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
-        cursor = self.conn.cursor()
-        cursor.execute(
-            """CREATE TABLE IF NOT EXISTS plates
-                            (patente text)"""
-        )
-        self.conn.commit()
-        cursor.close()
+        self.records_batch = []
+        self.client = None
+        self.db = None
+        self.collection = None
 
-    def update_in_memory(self, plates: list) -> None:
-        """
-        Actualiza en el set que vive en memoria
-        """
-        self.unique_plates.update(plates)
-        # Trigger insert si > frequency_insert
-        if len(self.unique_plates) > self.frequency_insert:
-            # Inserto en BD
-            self.insert_in_disk()
-            # Borrar el set
-            self.unique_plates.clear()
+        try:
+            self.client = MongoClient(self.mongo_uri)
+            # The ismaster command is cheap and does not require auth.
+            self.client.admin.command('ismaster') 
+            self.db = self.client[self.db_name]
+            self.collection = self.db[self.collection_name]
+            logger.info(f"Successfully connected to MongoDB: {self.mongo_uri}")
+        except ConnectionFailure:
+            logger.error(f"MongoDB connection failed at {self.mongo_uri}. Saver will not work.")
+            # Allow application to continue, but saver won't function
+        except Exception as e:
+            logger.error(f"An error occurred during MongoDB initialization: {e}")
 
-    def insert_in_disk(self):
+    def add_detection_record(self, camera_id: str, plate_number: str, confidence: float, image_path: str):
         """
-        Inserta en SQLite
+        Adds a single detection record to the current batch.
+        Triggers a batch insert if the batch size meets frequency_insert.
+
+        Parameters:
+            camera_id (str): Identifier for the camera/video source.
+            plate_number (str): The identified license plate.
+            confidence (float): Confidence score of the ANPR detection.
+            image_path (str): Path to the saved detection image.
         """
-        cursor = self.conn.cursor()
-        cursor.executemany(
-            "insert into plates(patente) values (?)",
-            [(plate,) for plate in self.unique_plates],
-        )
-        self.conn.commit()
-        cursor.close()
+        if self.collection is None: # Corrected check
+            logger.warning("MongoDB collection not available. Cannot add detection record.")
+            return
+
+        record = {
+            "camera_id": camera_id,
+            "plate_number": plate_number,
+            "confidence": confidence,
+            "timestamp": datetime.utcnow(), # Use UTC time for consistency
+            "image_path": image_path
+        }
+        self.records_batch.append(record)
+
+        if len(self.records_batch) >= self.frequency_insert:
+            self.insert_batch_to_mongo()
+
+    def insert_batch_to_mongo(self):
+        """
+        Inserts the current batch of records into MongoDB.
+        Clears the batch after insertion.
+        """
+        if self.collection is None: # Corrected check
+            logger.warning("MongoDB collection not available. Cannot insert batch.")
+            return
+
+        if not self.records_batch:
+            return
+
+        try:
+            self.collection.insert_many(self.records_batch)
+            logger.info(f"Successfully inserted {len(self.records_batch)} records into MongoDB.")
+            self.records_batch.clear()
+        except OperationFailure as e:
+            logger.error(f"MongoDB batch insert failed: {e}")
+            # Optionally, handle retry logic or save failed batches
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during MongoDB batch insert: {e}")
+
+
+    def flush_remaining_records(self):
+        """
+        Inserts any remaining records in the batch to MongoDB.
+        Useful to call before application shutdown.
+        """
+        if self.records_batch:
+            logger.info(f"Flushing {len(self.records_batch)} remaining records to MongoDB.")
+            self.insert_batch_to_mongo()
 
     def __del__(self):
-        # Commit cualquier cambio no guardado
-        self.conn.commit()
-        self.conn.close()
+        """
+        Ensures any remaining records are flushed and closes the MongoDB client connection.
+        """
+        if self.records_batch: # Ensure any pending records are saved
+            self.flush_remaining_records()
+        if self.client:
+            self.client.close()
+            logger.info("MongoDB client connection closed.")

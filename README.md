@@ -40,14 +40,36 @@ esta mejor optimizados para CPU y corren mas rapido en el procesador.
 
 ### Instalar dependencias
 
-Con python **3.x**:
+Se recomienda utilizar un entorno virtual para evitar conflictos con paquetes del sistema.
 
-```
-pip install -r requirements.txt
-```
+1.  **Crear un entorno virtual:**
+    ```bash
+    python3 -m venv .venv
+    ```
+    *(Esto creará un directorio llamado `.venv` en la raíz del proyecto)*
 
-Para correr con la **placa de video/GPU** y acelerar la inferencia, instalar
-estos **[requerimientos](https://www.tensorflow.org/install/gpu#software_requirements)**.
+2.  **Activar el entorno virtual:**
+    *   En Linux/macOS:
+        ```bash
+        source .venv/bin/activate
+        ```
+    *   En Windows (Git Bash):
+        ```bash
+        source .venv/Scripts/activate
+        ```
+    *   En Windows (CMD/PowerShell):
+        ```bash
+        .\.venv\Scripts\activate
+        ```
+    *(Deberías ver `(.venv)` al principio de la línea de comandos indicando que el entorno está activo)*
+
+3.  **Instalar las dependencias:**
+    Una vez activado el entorno, instala los paquetes necesarios:
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+Para correr con la **placa de video/GPU** y acelerar la inferencia, asegúrate de tener los **[requerimientos de software de TensorFlow para GPU](https://www.tensorflow.org/install/gpu#software_requirements)** instalados *antes* de instalar las dependencias de Python. Luego, instala las dependencias como se indicó en el paso 3.
 
 ### Visualizar solo localizador
 
