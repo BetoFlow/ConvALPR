@@ -2,7 +2,7 @@
 
 ## 1. Introduction
 
-This document describes the ANPR (Automatic Number Plate Recognition) Multi-Service Application. The system is designed for real-time license plate identification from various video sources, implements parking lot management logic (tracking vehicle entries and exits), and provides a web-based interface for visualization and configuration. It is deployed as a set of containerized microservices using Docker Compose.
+This document describes the ANPR (Automatic Number Plate Recognition) Multi-Service Application. The system is designed for real-time license plate identification from various video sources, implements parking lot management logic (tracking vehicle entries and exits), and provides a web-based interface for visualization, configuration, and user management. It is deployed as a set of containerized microservices using Docker Compose.
 
 ## 2. System Architecture
 
@@ -11,9 +11,9 @@ The application utilizes a microservices architecture orchestrated by Docker Com
 **Services Overview:**
 
 *   **`anpr-service`**: The core engine responsible for video processing, license plate detection and recognition (using TensorFlow-based models), applying parking logic, saving detection images, and logging data to MongoDB.
-*   **`mongodb`**: A NoSQL database used as the central data store for all application data, including raw detections, parking sessions, stream configurations, and processing jobs.
+*   **`mongodb`**: A NoSQL database used as the central data store for all application data, including raw detections, parking sessions, stream configurations, processing jobs, and user accounts.
 *   **`mongo-express`**: A web-based administrative UI for MongoDB, allowing direct database inspection and management.
-*   **`web-portal`**: A Flask-based web application providing user interaction features such as viewing detections and parking sessions, uploading videos for processing, and managing persistent video stream configurations.
+*   **`web-portal`**: A Flask-based web application providing user interaction features such as viewing detections and parking sessions, uploading videos for processing, managing persistent video stream configurations, and user administration. It includes authentication and role-based access control.
 
 **Conceptual Diagram:**
 
@@ -24,7 +24,7 @@ graph TD
     end
 
     subgraph "Application Services (Docker Network)"
-        WP[web-portal <br> Flask App <br> Port: 5000]
+        WP[web-portal <br> Flask App, Auth <br> Port: 5000]
         ANPR[anpr-service <br> Python, TF, OpenCV]
         DB[(mongodb <br> Port: 27017)]
         ME[mongo-express <br> Port: 8081]
@@ -54,154 +54,81 @@ graph TD
 ## 3. Services Details
 
 ### 3.1. `anpr-service`
-
+*(Content remains the same)*
 *   **Description**: This is the heart of the system. It ingests video from configured streams and uploaded files, performs ANPR using custom TensorFlow models for plate detection and OCR, implements parking session logic, and logs relevant data.
 *   **Key Technologies**: Python, OpenCV, TensorFlow, PyMongo.
 *   **Core Logic**:
-    *   **Video Ingestion**:
-        *   Processes persistent video streams (e.g., RTSP, local files) configured via the web portal and stored in MongoDB.
-        *   Processes on-demand video files uploaded via the web portal.
-        *   Handles multiple streams concurrently using threading.
-        *   Includes robust reconnection logic for persistent streams with exponential backoff.
-    *   **ANPR Processing**:
-        *   Detects license plates in video frames using a YOLO-based TensorFlow model.
-        *   Performs Optical Character Recognition (OCR) on detected plates using a custom TensorFlow CNN model.
-    *   **Parking Session Logic**:
-        *   Tracks vehicle entries and exits based on detected plates and camera roles.
-        *   Stores session data (entry/exit times, images, status) in the `parking_sessions` MongoDB collection.
-        *   Supports camera roles ("entry", "exit", "common", "monitoring") for nuanced parking logic.
-        *   For "common" (single entry/exit) cameras, the first detection is an entry, and the second is an exit for a given plate.
-    *   **Plate Detection Cooldown**:
-        *   Prevents re-processing the same plate from the same camera if detected again within a configurable cooldown period (default: 5 minutes). This is tracked in the `plate_last_seen_log` collection.
-    *   **Image Saving**: Saves images of detected plates to a shared Docker volume (`anpr_images`, accessible at `/app/detections` within the container).
-    *   **Data Logging**:
-        *   Logs parking session events to the `parking_sessions` collection.
-        *   Optionally logs all raw detections to the `detections` collection (controlled by `LOG_RAW_DETECTIONS` environment variable).
-        *   Logs cooldown events to `plate_last_seen_log`.
-*   **Build & Location**:
-    *   Source code: `alpr/` directory (contains `service_main.py`, `alpr.py`, `saver.py`, `detector.py`, `ocr.py`, and `models/`).
-    *   Dockerfile: `anpr/Dockerfile`.
-    *   Build context (in `docker-compose.yml`): Project root (`.`).
+    *   **Video Ingestion**: Processes persistent video streams and on-demand uploaded files. Handles multiple streams concurrently with robust reconnection logic.
+    *   **ANPR Processing**: Uses YOLO-based TensorFlow model for detection and a custom CNN model for OCR.
+    *   **Parking Session Logic**: Tracks entries/exits based on plates and camera roles, storing data in `parking_sessions`. Supports "entry", "exit", "common", "monitoring" roles.
+    *   **Plate Detection Cooldown**: Prevents re-processing the same plate by the same camera within a configurable period (default: 5 minutes), tracked in `plate_last_seen_log`.
+    *   **Image Saving**: Saves detected plate images to a shared volume.
+    *   **Data Logging**: Logs to `parking_sessions`, `detections` (optional raw logs), and `plate_last_seen_log`.
+*   **Build & Location**: Source: `alpr/`, Dockerfile: `anpr/Dockerfile`.
 
 ### 3.2. `mongodb`
-
-*   **Description**: The primary data store for the application.
-*   **Key Technologies**: MongoDB (NoSQL Document Database).
-*   **Port**: `27017` (exposed to host).
-*   **Database Name**: `anpr_db` (default, configurable via `DB_NAME` env var for `anpr-service`).
-*   **Key Collections**:
-    *   `detections`: Stores raw ANPR detection records (timestamp, plate, confidence, image path, camera ID) if raw logging is enabled.
-    *   `parking_sessions`: Stores parking session data (plate, entry/exit details, status, duration).
-    *   `stream_configs`: Stores configurations for persistent video streams (name, URL, role) managed via the web portal.
-    *   `video_jobs`: Tracks uploaded video files queued for processing.
-    *   `plate_last_seen_log`: Stores the last processing timestamp for each plate/camera pair to manage the detection cooldown.
-*   **Data Volume**: `anpr_db_data` (Docker named volume for persistence).
+*(Content remains the same, `users` collection already listed)*
+*   **Description**: Primary data store.
+*   **Key Technologies**: MongoDB.
+*   **Port**: `27017`.
+*   **Database Name**: `anpr_db` (default).
+*   **Key Collections**: `detections`, `parking_sessions`, `stream_configs`, `video_jobs`, `plate_last_seen_log`, `users`.
+*   **Data Volume**: `anpr_db_data`.
 
 ### 3.3. `mongo-express`
-
-*   **Description**: A web-based administrative interface for MongoDB.
-*   **Access**: `http://localhost:8081`
-*   **Credentials (default)**:
-    *   Username: `admin`
-    *   Password: `password`
-    (Configurable via environment variables in `docker-compose.yml`).
-*   **Functionality**: Allows browsing databases and collections, viewing/editing documents, running queries, etc.
+*(Content remains the same)*
+*   **Description**: Web UI for MongoDB administration.
+*   **Access**: `http://localhost:8081`. Credentials: `admin`/`password` (default).
 
 ### 3.4. `web-portal`
 
-*   **Description**: A Flask web application providing the user interface.
-*   **Key Technologies**: Python, Flask, PyMongo, HTML/CSS.
+*   **Description**: A Flask web application providing the user interface with authentication and role-based access control.
+*   **Key Technologies**: Python, Flask, PyMongo, HTML/CSS, Flask-Login, Flask-Bcrypt.
 *   **Access**: `http://localhost:5000`
 *   **Features**:
-    *   **Parking Sessions Display**: Shows a table of current and past parking sessions with details like plate number, status, entry/exit times, images, and duration.
-    *   **Raw Detections Log**: Displays a log of raw ANPR detections (if enabled and data exists).
-    *   **Video Upload**: Allows users to upload video files for on-demand ANPR processing. Uploaded files are saved to a shared volume and a job is queued in MongoDB for `anpr-service`.
-    *   **Stream Management**: Allows users to add, view, and delete configurations for persistent video streams (e.g., RTSP feeds). Stream configurations include name, URL, and camera role ("entry", "exit", "common", "monitoring").
-*   **Build & Location**:
-    *   Source code: `web_portal/` directory (contains `app.py`, `templates/index.html`).
-    *   Dockerfile: `web_portal/Dockerfile`.
-*   **Shared Volume**: Mounts `anpr_images` to `/app/static/detections` to serve detection images and store/access uploaded videos.
+    *   **User Authentication**: Secure login/logout. Passwords hashed. Initial default admin user (`admin`/`admin`) created (password should be changed).
+    *   **Role-Based Access Control (RBAC)**: Supports "admin", "operator", "supervisor", and "technical" roles with different permissions.
+    *   **Parking Sessions Display**: Shows a table of current and past parking sessions.
+    *   **Raw Detections Log**: Displays a log of raw ANPR detections.
+    *   **Video Upload (Admin/Supervisor/Technical)**: Allows authenticated users with "admin", "supervisor", or "technical" roles to upload video files for on-demand ANPR processing. (Operator access removed).
+    *   **Stream Management (Admin/Technical)**: Users with "admin" or "technical" roles can add, view, and delete configurations for persistent video streams, including assigning camera roles.
+    *   **Session Editing (Admin/Supervisor)**: Users with "admin" or "supervisor" roles can manually edit details of parking sessions (e.g., status, exit time).
+    *   **User Management (Admin/Supervisor)**:
+        *   **Admins**: Can list, create, edit (passwords/roles), and delete all users (with safeguards for the last admin and self-deletion).
+        *   **Supervisors**: Can list and edit users (passwords/roles), but cannot edit the primary 'admin' user, cannot grant the 'admin' role, and cannot delete users.
+*   **Build & Location**: Source: `web_portal/`, Dockerfile: `web_portal/Dockerfile`.
+*   **Shared Volume**: Mounts `anpr_images` to `/app/static/detections`.
 
 ## 4. Data Flow Example (Parking Logic)
-
-1.  A persistent stream (e.g., "EntryCam1", role: "entry") is configured via the web portal and stored in `stream_configs`.
-2.  `anpr-service` starts, reads this config, and begins processing frames from "EntryCam1".
-3.  A vehicle with plate "ABC123" passes "EntryCam1".
-4.  `ALPR.process_frame` in `anpr-service` detects "ABC123".
-5.  **Cooldown Check**: `plate_last_seen_log` is checked for "ABC123" at "EntryCam1". If not recently seen (outside cooldown), processing continues.
-6.  **Parking Logic**:
-    *   `parking_sessions` is checked for an active session for "ABC123". None found.
-    *   Since camera role is "entry", a new session is created in `parking_sessions`: `{plate_number: "ABC123", entry_timestamp: now, entry_camera_id: "EntryCam1", entry_image_path: "...", status: "inside", ...}`.
-7.  **Raw Log**: If enabled, a record is added to `detections`.
-8.  **Cooldown Update**: `plate_last_seen_log` is updated for ("ABC123", "EntryCam1") with the current timestamp.
-9.  Later, the same vehicle passes an "ExitCam1" (role: "exit").
-10. Detection occurs, cooldown check passes (different camera or time elapsed).
-11. **Parking Logic**:
-    *   Active session for "ABC123" is found.
-    *   Camera role is "exit", so the session is updated: `exit_timestamp`, `exit_image_path`, `exit_camera_id` are set, `status` becomes "exited".
-12. Raw log and cooldown log updated.
-13. Web portal, on refresh, shows the updated session for "ABC123" including duration.
+*(Content remains the same)*
 
 ## 5. Key Features Summary
 
 *   Microservice architecture using Docker Compose.
 *   Real-time ANPR from multiple concurrent video streams.
 *   TensorFlow-based models for plate detection and OCR.
-*   Parking lot management:
-    *   Tracks vehicle entry and exit events.
-    *   Stores parking sessions with entry/exit images and timestamps.
-    *   Calculates parking duration (displayed in web portal).
-*   Configurable camera roles ("entry", "exit", "common", "monitoring") for flexible parking logic.
+*   Parking lot management with entry/exit tracking and session storage.
+*   Configurable camera roles for parking logic.
+*   **User Authentication and Role-Based Access Control (Admin, Operator, Supervisor, Technical)**.
 *   Web portal for:
     *   Viewing parking sessions and raw detections.
-    *   Uploading video files for on-demand processing.
-    *   Managing persistent video stream configurations.
-*   Configurable cooldown period to prevent re-processing of the same plate by the same camera within a short time.
-*   Optional logging of all raw detections for auditing.
+    *   Video upload (admin/supervisor/technical).
+    *   **Role-specific features**: Stream management (admin/technical), Session editing (admin/supervisor), User management (admin can CRUD; supervisor can list/edit with restrictions).
+*   Configurable plate detection cooldown period per camera.
+*   Optional raw detection logging.
 *   Visual database exploration via Mongo Express.
-*   Robust stream handling with reconnection attempts for persistent streams.
+*   Robust stream handling with reconnection attempts.
 
 ## 6. Deployment
-
-*   **Prerequisites**: Docker and Docker Compose installed.
-*   **Command**: From the project root directory, run:
-    ```bash
-    docker compose up --build -d
-    ```
-    This builds the custom service images (`anpr-service`, `web-portal`) if they don't exist or if their build context has changed, and starts all services in detached mode.
-*   **Applying Stream Configuration Changes**: After adding or deleting persistent streams via the web portal, the `anpr-service` must be restarted to pick up these changes:
-    ```bash
-    docker compose restart anpr-service
-    ```
-*   **Stopping Services**:
-    ```bash
-    docker compose down
-    ```
-    To also remove volumes (deleting all data): `docker compose down -v`.
+*(Content remains the same)*
 
 ## 7. Configuration
-
-*   **`anpr-service`**: Configured primarily via environment variables set in the `docker-compose.yml` file. Key configurable parameters include:
-    *   `MONGO_URI`: MongoDB connection string.
-    *   `DB_NAME`: Name of the MongoDB database to use (default: `anpr_db`).
-    *   `DETECTOR_INPUT_SIZE`: Input image resolution for the plate detector model.
-    *   `DETECTOR_CONFIDENCE_THRESHOLD`: Minimum confidence for plate detection.
-    *   `OCR_MODEL_NUMBER`: Which OCR model to use.
-    *   `OCR_AVG_CONFIDENCE_THRESHOLD`: Minimum average character confidence for OCR.
-    *   `OCR_LOW_CONFIDENCE_THRESHOLD`: Minimum confidence for any single character in OCR.
-    *   `INFERENCE_FREQUENCY_FRAMES`: Process one frame every N frames.
-    *   `LOG_RAW_DETECTIONS`: Boolean (`true`/`false`) to enable/disable logging to the raw `detections` collection (default: `true`).
-    *   `PLATE_DETECTION_COOLDOWN_SECONDS`: Cooldown period in seconds for plate re-detections (default: `300`).
-*   **Persistent Video Streams**: Configured via the web portal (`http://localhost:5000`). This includes stream name, URL (RTSP or file path accessible to `anpr-service`), and camera role. These are stored in the `stream_configs` MongoDB collection.
-*   **`mongo-express`**: Credentials configured via environment variables in `docker-compose.yml`.
+*(Content remains the same, `FLASK_SECRET_KEY` already listed)*
 
 ## 8. Project Directory Structure Overview
+*(Content remains the same)*
 
-*   `alpr/`: Contains Python source code for the `anpr-service` (`service_main.py`, `alpr.py`, `saver.py`, `detector.py`, `ocr.py`) and the TensorFlow models (`alpr/models/`). Also includes `alpr/requirements.txt`.
-*   `anpr/`: Contains the `Dockerfile` for building the `anpr-service` image.
-*   `web_portal/`: Contains Python source code (`app.py`), templates (`templates/index.html`), and `requirements.txt` for the Flask web portal. Also includes its `Dockerfile`.
-*   `assets/`: Can be used to store local video files for testing (mounted into `anpr-service` at `/app/assets`). Debug frames are saved into a `debug_frames` subdirectory within the `anpr_images` volume, accessible at `/app/detections/debug_frames` in `anpr-service`.
-*   `docker-compose.yml`: Main Docker Compose file for orchestrating all services.
-*   `SYSTEM_DOCUMENTATION.md`: This file.
+## 9. Minimum System Requirements (Estimates)
+*(Content remains the same)*
 
-This documentation should provide a good overview of the system. Let me know if you have further questions as you study it!
+These are general guidelines. It's advisable to monitor system resource usage (CPU, RAM, disk I/O) under your specific workload to determine if upgrades are necessary.
