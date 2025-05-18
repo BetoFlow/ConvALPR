@@ -1,0 +1,3 @@
+Flask>=2.0
+PyMongo>=3.12
+# Add other dependencies as needed, e.g., for specific financial calculations or printer libraries

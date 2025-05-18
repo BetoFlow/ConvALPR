@@ -133,9 +133,24 @@ class ALPR(MongoSaver):
                                     logger.warning(f"Plate {plate_number} at EXIT camera {camera_id} but no active session.")
                                 else: 
                                     logger.info(f"Plate {plate_number} ENTERING at {camera_role} camera {camera_id}.")
-                                    new_session = {"plate_number": plate_number, "entry_timestamp": current_frame_timestamp, "entry_image_path": db_image_path, "entry_camera_id": camera_id, "exit_timestamp": None, "exit_image_path": None, "exit_camera_id": None, "status": "inside", "last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}
+                                    new_session = {
+                                        "plate_number": plate_number, 
+                                        "entry_timestamp": current_frame_timestamp, 
+                                        "entry_image_path": db_image_path, 
+                                        "entry_camera_id": camera_id, 
+                                        "exit_timestamp": None, 
+                                        "exit_image_path": None, 
+                                        "exit_camera_id": None, 
+                                        "status": "inside", 
+                                        "last_seen_timestamp": current_frame_timestamp, 
+                                        "last_seen_camera_id": camera_id,
+                                        "vehicle_type": None, # Added: Default to None, to be set via UI
+                                        "price_per_hour": None, # Placeholder for future rate association
+                                        "calculated_cost": None, # Placeholder
+                                        "payment_status": "unpaid" # Default payment status
+                                    }
                                     iresult = self.parking_sessions_collection.insert_one(new_session)
-                                    logger.info(f"Parking session for {plate_number} created. Ack: {iresult.acknowledged}")
+                                    logger.info(f"Parking session for {plate_number} created with vehicle_type=None, payment_status=unpaid. Ack: {iresult.acknowledged}")
                                     parking_logic_processed = True
                         except Exception as e_parking:
                             logger.error(f"Error during parking logic for {plate_number}: {e_parking}", exc_info=True)

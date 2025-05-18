@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Process Payment - ANPR System</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 600px; margin: auto; }
+        h1 { text-align: center; color: #333; }
+        label { display: block; margin-top: 15px; margin-bottom: 5px; color: #555; font-weight: bold; }
+        input[type="text"], input[type="number"] { width: calc(100% - 22px); padding: 10px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        input[readonly] { background-color: #f0f0f0; }
+        .form-group { margin-bottom: 15px; }
+        .form-actions { margin-top: 20px; text-align: right; }
+        input[type="submit"], .cancel-link { background-color: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; text-decoration: none; display: inline-block; }
+        .cancel-link { background-color: #aaa; margin-left: 10px; }
+        .flash-message { padding: 10px; margin-bottom: 15px; border-radius: 4px; text-align: center; }
+        .flash-message.error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .flash-message.success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .nav-link { display: block; text-align: left; margin-bottom: 20px; }
+        .charge-details p { margin: 5px 0; }
+        .charge-details strong { font-size: 1.2em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="{{ url_for('index') }}" class="nav-link">&laquo; Back to Dashboard</a>
+        <h1>Process Payment for Session: {{ session.plate_number }}</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <p class="flash-message {{ category }}">{{ message }}</p>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="session-details">
+            <p><strong>Plate Number:</strong> {{ session.plate_number }}</p>
+            <p><strong>Entry Time:</strong> {{ session.entry_timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if session.entry_timestamp else 'N/A' }}</p>
+            <p><strong>Vehicle Type:</strong> {{ session.vehicle_type | default('Not Set - Please edit session to set type', true) }}</p>
+            <p><strong>Current Status:</strong> {{ session.status | capitalize }}</p>
+        </div>
+
+        <hr>
+
+        <div class="charge-details">
+            <h2>Charge Calculation</h2>
+            {% if charge_info %}
+                <p>Duration (so far): {{ charge_info.duration_total_minutes | round(0) }} minutes</p>
+                <p>Modality Applied: {{ charge_info.modality_applied }}</p>
+                <p>Inflation Factor Applied: {{ "%.3f"|format(charge_info.inflation_factor_applied) }}</p>
+                <p><strong>Total Amount Due: ARS {{ "%.2f"|format(charge_info.calculated_total_charge) }}</strong></p>
+            {% elif error_calculating_charge %}
+                <p style="color: red;">Error calculating charge: {{ error_calculating_charge }}</p>
+                <p>Please ensure vehicle type is set for the session and rate configurations are complete.</p>
+            {% else %}
+                <p>Calculating charge...</p> {# Or show a loading indicator #}
+            {% endif %}
+        </div>
+
+        <hr>
+        
+        {% if charge_info and not error_calculating_charge %}
+        <form method="POST" action="{{ url_for('process_payment', session_id=session._id|string) }}">
+            <input type="hidden" name="calculated_total_charge" value="{{ charge_info.calculated_total_charge }}">
+            <input type="hidden" name="modality_applied" value="{{ charge_info.modality_applied }}">
+            <input type="hidden" name="inflation_factor_applied" value="{{ charge_info.inflation_factor_applied }}">
+            <input type="hidden" name="duration_minutes" value="{{ charge_info.duration_total_minutes }}">
+
+
+            <div class="form-group">
+                <label for="amount_received">Amount Received (ARS):</label>
+                <input type="number" step="any" id="amount_received" name="amount_received" required oninput="calculateChange()">
+            </div>
+
+            <div class="form-group">
+                <label>Change to Give (ARS):</label>
+                <span id="change_to_give" style="font-size: 1.1em; font-weight: bold;">-</span>
+            </div>
+            <div id="payment_alert" style="color: red; font-weight: bold; margin-top: 10px;"></div>
+
+
+            <div class="form-actions">
+                <input type="submit" id="confirm_payment_button" value="Confirm Payment & Pre-End Session">
+            </div>
+        </form>
+
+        <script>
+            function calculateChange() {
+                const totalDueElement = document.getElementsByName("calculated_total_charge")[0];
+                const amountReceivedElement = document.getElementById("amount_received");
+                const changeToGiveElement = document.getElementById("change_to_give");
+                const paymentAlertElement = document.getElementById("payment_alert");
+                const confirmButton = document.getElementById("confirm_payment_button");
+
+                const totalDue = parseFloat(totalDueElement.value);
+                const amountReceived = parseFloat(amountReceivedElement.value);
+
+                paymentAlertElement.textContent = ""; // Clear previous alert
+                confirmButton.disabled = false; // Enable button by default
+
+                if (isNaN(totalDue)) {
+                    changeToGiveElement.textContent = "-"; // Should not happen if charge_info is present
+                    return;
+                }
+
+                if (isNaN(amountReceived)) {
+                    changeToGiveElement.textContent = "-";
+                    // Optionally disable button if no valid amount received
+                    // confirmButton.disabled = true; 
+                    return;
+                }
+
+                if (amountReceived < totalDue) {
+                    paymentAlertElement.textContent = "Amount received is less than total due!";
+                    changeToGiveElement.textContent = "-";
+                    confirmButton.disabled = true; // Disable confirm button if amount is insufficient
+                } else {
+                    const change = amountReceived - totalDue;
+                    changeToGiveElement.textContent = change.toFixed(2);
+                }
+            }
+            
+            // Initial calculation in case the page is reloaded with values (e.g. after server-side validation error)
+            // or if browser autofills.
+            document.addEventListener('DOMContentLoaded', function() {
+                if (document.getElementById("amount_received").value) {
+                     calculateChange();
+                }
+            });
+        </script>
+        {% endif %}
+
+    </div>
+</body>
+</html>

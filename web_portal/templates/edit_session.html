@@ -48,6 +48,45 @@
                     <img src="{{ session.entry_image_url }}" alt="Entry Image" class="image-preview">
                 {% endif %}
             </div>
+
+            <div class="form-group">
+                <label for="vehicle_type">Vehicle Type:</label>
+                <select id="vehicle_type" name="vehicle_type">
+                    <option value="" {% if not session.vehicle_type %}selected{% endif %}>-- Select Type --</option>
+                    {% for code, label in vehicle_types.items() %}
+                        <option value="{{ code }}" {% if session.vehicle_type == code %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+                {% if not session.vehicle_type %}<small style="color: orange;">Vehicle type not set. Please select one.</small>{% endif %}
+            </div>
+
+            <div class="form-group">
+                <label>Payment Status:</label>
+                <input type="text" value="{{ session.payment_status | default('unpaid') | capitalize }}" readonly>
+            </div>
+
+            {% if session.payment_status == 'paid_pending_exit' or session.payment_status == 'completed_paid' %}
+            <div class="form-group">
+                <label>Calculated Cost (ARS):</label>
+                <input type="text" value="{{ '%.2f'|format(session.calculated_cost | default(0)) }}" readonly>
+            </div>
+            <div class="form-group">
+                <label>Amount Received (ARS):</label>
+                <input type="text" value="{{ '%.2f'|format(session.amount_received | default(0)) }}" readonly>
+            </div>
+            <div class="form-group">
+                <label>Change Given (ARS):</label>
+                <input type="text" value="{{ '%.2f'|format(session.change_given | default(0)) }}" readonly>
+            </div>
+            <div class="form-group">
+                <label>Payment Timestamp:</label>
+                <input type="text" value="{{ session.payment_timestamp.strftime('%Y-%m-%d %H:%M:%S UTC') if session.payment_timestamp else 'N/A' }}" readonly>
+            </div>
+            <div class="form-group">
+                <label>Payment Processed By:</label>
+                <input type="text" value="{{ session.payment_processed_by | default('N/A') }}" readonly>
+            </div>
+            {% endif %}
             
             <div class="form-group">
                 <label for="exit_timestamp">Exit Time (YYYY-MM-DDTHH:MM):</label>

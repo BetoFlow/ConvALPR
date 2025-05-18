@@ -40,8 +40,11 @@
     <div style="width: 90%; margin: 10px auto; padding: 10px; background-color: #eee; text-align: right;">
         {% if current_user.is_authenticated %}
             Logged in as: <strong>{{ current_user.username }}</strong> (Roles: {{ current_user.roles|join(', ') }})
-            {% if current_user.has_role('admin') or current_user.has_role('supervisor') %} {# Supervisors can also manage users #}
+            {% if current_user.has_role('admin') or current_user.has_role('supervisor') %}
             <a href="{{ url_for('manage_users') }}" style="margin-left: 15px;">Manage Users</a>
+            {% endif %}
+            {% if current_user.has_role('admin') %}
+            <a href="{{ url_for('admin_settings') }}" style="margin-left: 15px;">Admin Settings</a>
             {% endif %}
             <a href="{{ url_for('logout') }}" style="margin-left: 15px;">Logout</a>
         {% else %}
@@ -136,6 +139,7 @@
                     <th>Exit Camera</th>
                     <th>Exit Image</th>
                     <th>Duration</th>
+                    <th>Payment Status</th> {# New Column #}
                     {% if current_user.is_authenticated and (current_user.has_role('admin') or current_user.has_role('supervisor')) %}
                     <th>Actions</th>
                     {% endif %}
@@ -146,7 +150,7 @@
                 <tr>
                     <td>{{ session.plate_number }}</td>
                     <td>{{ session.status|capitalize }}</td>
-                    <td>{{ session.entry_timestamp.strftime('%Y-%m-%d %H:%M:%S') if session.entry_timestamp else 'N/A' }}</td>
+                    <td>{{ session.entry_timestamp | datetime_local if session.entry_timestamp else 'N/A' }}</td>
                     <td>{{ session.entry_camera_id|default('N/A') }}</td>
                     <td>
                         {% if session.entry_image_url %}
@@ -155,7 +159,7 @@
                             No Image
                         {% endif %}
                     </td>
-                    <td>{{ session.exit_timestamp.strftime('%Y-%m-%d %H:%M:%S') if session.exit_timestamp else 'N/A' }}</td>
+                    <td>{{ session.exit_timestamp | datetime_local if session.exit_timestamp else 'N/A' }}</td>
                     <td>{{ session.exit_camera_id|default('N/A') }}</td>
                     <td>
                         {% if session.exit_image_url %}
@@ -165,9 +169,22 @@
                         {% endif %}
                     </td>
                     <td>{{ session.duration_str }}</td>
+                    <td>
+                        {{ session.get('payment_status', 'unpaid')|capitalize }}
+                        {% if session.get('payment_status') == 'paid_pending_exit' or session.get('payment_status') == 'completed_paid' %}
+                            <br><small>Cost: {{ "%.2f"|format(session.calculated_cost | default(0)) }}</small>
+                            <br><small>Rcvd: {{ "%.2f"|format(session.amount_received | default(0)) }}</small>
+                            <br><small>Chg: {{ "%.2f"|format(session.change_given | default(0)) }}</small>
+                        {% endif %}
+                    </td>
                     {% if current_user.is_authenticated and (current_user.has_role('admin') or current_user.has_role('supervisor')) %}
                     <td>
-                        <a href="{{ url_for('edit_session', session_id=session._id|string) }}">Edit</a>
+                        <a href="{{ url_for('edit_session', session_id=session._id|string) }}" style="margin-right: 5px;">Edit</a>
+                        {% if session.status == 'inside' and session.get('payment_status', 'unpaid') == 'unpaid' %}
+                            <a href="{{ url_for('process_payment', session_id=session._id|string) }}" style="background-color: #007bff; color:white; padding: 2px 5px; text-decoration: none; border-radius: 3px;">Pay</a>
+                        {% elif session.get('payment_status') == 'paid_pending_exit' %}
+                            <span style="color: green; font-weight: bold;">Paid</span>
+                        {% endif %}
                     </td>
                     {% endif %}
                 </tr>
@@ -195,7 +212,7 @@
             <tbody>
                 {% for detection_doc in detections %} {# Changed loop variable name #}
                 <tr>
-                    <td>{{ detection_doc.timestamp.strftime('%Y-%m-%d %H:%M:%S') if detection_doc.timestamp else 'N/A' }}</td>
+                    <td>{{ detection_doc.timestamp | datetime_local if detection_doc.timestamp else 'N/A' }}</td>
                     <td>{{ detection_doc.plate_number if detection_doc.plate_number else 'N/A' }}</td>
                     <td>{{ "%.2f"|format(detection_doc.confidence) if detection_doc.confidence else 'N/A' }}%</td>
                     <td>{{ detection_doc.camera_id if detection_doc.camera_id else 'N/A' }}</td>

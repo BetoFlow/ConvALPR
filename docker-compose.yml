@@ -67,6 +67,29 @@ services:
     networks:
       - anpr_network
 
+  cashier-service:
+    build:
+      context: ./cashier_service
+      dockerfile: Dockerfile # Path relative to context
+    container_name: cashier_service
+    ports:
+      - "5001:5001" # Expose cashier service on host port 5001
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017/
+      - DB_NAME=anpr_db
+      - FLASK_APP=app.py
+      - FLASK_RUN_HOST=0.0.0.0
+      - FLASK_RUN_PORT=5001 
+      - FLASK_DEBUG=1 
+      # - FLASK_SECRET_KEY=a_strong_secret_key_for_cashier # If sessions/flash needed
+    depends_on:
+      - mongodb
+    networks:
+      - anpr_network
+    # Add volumes if cashier_service needs to persist any local files (e.g., logs not to stdout)
+    # volumes:
+    #   - ./cashier_service_logs:/app/logs 
+
 volumes:
   anpr_db_data:
   anpr_images:

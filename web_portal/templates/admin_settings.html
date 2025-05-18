@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin Settings - ANPR System</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f4; color: #333; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); max-width: 800px; margin: auto; }
+        h1, h2 { text-align: center; color: #333; }
+        label { display: block; margin-top: 10px; margin-bottom: 5px; font-weight: bold; }
+        input[type="text"], input[type="number"] { width: calc(100% - 22px); padding: 8px; margin-bottom: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
+        .form-actions input[type="submit"], .button-link { background-color: #4CAF50; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; text-decoration: none; display: inline-block; margin-top:10px; }
+        .button-link:hover, input[type="submit"]:hover { background-color: #45a049; }
+        .flash-message { padding: 10px; margin-bottom: 15px; border-radius: 4px; text-align: center; }
+        .flash-message.error { background-color: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .flash-message.success { background-color: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .nav-link { display: block; text-align: left; margin-bottom: 20px; }
+        .settings-section { margin-bottom: 30px; padding-bottom: 20px; border-bottom: 1px solid #eee; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <a href="{{ url_for('index') }}" class="nav-link">&laquo; Back to Dashboard</a>
+        <h1>Admin Settings</h1>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <p class="flash-message {{ category }}">{{ message }}</p>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <div class="settings-section">
+            <h2>Inflation Adjustment Factor</h2>
+            <form method="POST" action="{{ url_for('update_inflation_factor') }}">
+                <div>
+                    <label for="inflation_factor">Inflation Adjustment Factor (e.g., 1.03 for 3% increase):</label>
+                    <input type="number" step="0.001" id="inflation_factor" name="inflation_factor" value="{{ current_inflation_factor | default(1.0) }}" required>
+                    {% if last_updated and last_updated != 'N/A' %}
+                    <p><small>Current factor: <strong>{{ current_inflation_factor | default(1.0) }}</strong> (Last updated: {{ last_updated }})</small></p>
+                    {% else %}
+                    <p><small>Current factor: <strong>{{ current_inflation_factor | default(1.0) }}</strong> (Not yet set or unable to retrieve last update time)</small></p>
+                    {% endif %}
+                </div>
+                <div class="form-actions">
+                    <input type="submit" value="Update Inflation Factor">
+                </div>
+            </form>
+        </div>
+
+        <div class="settings-section">
+            <h2>Operational Timezone</h2>
+            <form method="POST" action="{{ url_for('update_operational_timezone') }}"> {# New route needed #}
+                <div>
+                    <label for="operational_timezone">Timezone (e.g., America/Argentina/Buenos_Aires, UTC, US/Eastern):</label>
+                    <input type="text" id="operational_timezone" name="operational_timezone" 
+                           value="{{ current_operational_timezone | default('UTC') }}" 
+                           list="common_timezones" required>
+                    <datalist id="common_timezones">
+                        <option value="UTC">
+                        <option value="America/New_York">
+                        <option value="America/Chicago">
+                        <option value="America/Denver">
+                        <option value="America/Los_Angeles">
+                        <option value="Europe/London">
+                        <option value="Europe/Paris">
+                        <option value="Asia/Tokyo">
+                        <option value="Australia/Sydney">
+                        <option value="America/Argentina/Buenos_Aires">
+                        {# Add more common timezones as needed #}
+                    </datalist>
+                    {% if operational_timezone_last_updated %}
+                    <p><small>Current setting: <strong>{{ current_operational_timezone }}</strong> (Last updated: {{ operational_timezone_last_updated }})</small></p>
+                    {% else %}
+                    <p><small>Current setting: <strong>{{ current_operational_timezone | default('UTC') }}</strong> (Not yet set or unable to retrieve last update time)</small></p>
+                    {% endif %}
+                    <p><small><em>Important: Ensure the entered timezone is valid (see <a href="https://en.wikipedia.org/wiki/List_of_tz_database_time_zones" target="_blank">tz database names</a>). Incorrect values may cause errors. Web portal uses this for converting manual exit times.</em></small></p>
+                </div>
+                <div class="form-actions">
+                    <input type="submit" value="Update Timezone">
+                </div>
+            </form>
+        </div>
+        
+        <div class="settings-section">
+            <h2>Base Rate Configuration</h2>
+            {% if all_rates %}
+            <form method="POST" action="{{ url_for('update_base_rates') }}"> {# New route needed #}
+                {% for vehicle_type_code, data in all_rates.items() %}
+                <fieldset style="margin-bottom: 20px; border: 1px solid #ccc; padding: 15px;">
+                    <legend style="font-size: 1.2em; font-weight: bold;">{{ data.vehicle_type_label | default(vehicle_type_code) }}</legend>
+                    
+                    <input type="hidden" name="{{ vehicle_type_code }}_vehicle_type_code" value="{{ vehicle_type_code }}">
+
+                    <h3>Modalities:</h3>
+                    {# HOURLY Rate #}
+                    <div style="margin-left: 20px; margin-bottom:15px; border-left: 2px solid #eee; padding-left:15px;">
+                        <h4>Hourly Rate (Tarifa por Hora)</h4>
+                        <label for="{{ vehicle_type_code }}_HOURLY_base_value">Base Value (ARS):</label>
+                        <input type="number" step="any" id="{{ vehicle_type_code }}_HOURLY_base_value" 
+                               name="{{ vehicle_type_code }}_HOURLY_base_value" 
+                               value="{{ data.rates.get('HOURLY', {}).get('base_value', 0) }}">
+                        
+                        <label for="{{ vehicle_type_code }}_HOURLY_fraction_minutes">Fraction (minutes, e.g., 30):</label>
+                        <input type="number" id="{{ vehicle_type_code }}_HOURLY_fraction_minutes" 
+                               name="{{ vehicle_type_code }}_HOURLY_fraction_minutes" 
+                               value="{{ data.rates.get('HOURLY', {}).get('fraction_minutes', 30) }}">
+                        
+                        <label for="{{ vehicle_type_code }}_HOURLY_first_hour_full">First Hour Full Charge:</label>
+                        <select id="{{ vehicle_type_code }}_HOURLY_first_hour_full" name="{{ vehicle_type_code }}_HOURLY_first_hour_full">
+                            <option value="true" {% if data.rates.get('HOURLY', {}).get('first_hour_full') == true %}selected{% endif %}>Yes</option>
+                            <option value="false" {% if data.rates.get('HOURLY', {}).get('first_hour_full', true) == false %}selected{% endif %}>No</option> {# Default to No if not present or if explicitly false #}
+                        </select>
+                        <small>Daily Cap for Hourly: Uses 'DAILY' rate for this vehicle type.</small>
+                    </div>
+
+                    {# DAILY Rate #}
+                    <div style="margin-left: 20px; margin-bottom:15px; border-left: 2px solid #eee; padding-left:15px;">
+                        <h4>Full Day Rate (Estadía Completa)</h4>
+                        <label for="{{ vehicle_type_code }}_DAILY_base_value">Base Value (ARS):</label>
+                        <input type="number" step="any" id="{{ vehicle_type_code }}_DAILY_base_value" 
+                               name="{{ vehicle_type_code }}_DAILY_base_value" 
+                               value="{{ data.rates.get('DAILY', {}).get('base_value', 0) }}">
+                        <small>Applies if duration > 6 hours and <= 24 hours.</small>
+                    </div>
+                    
+                    {# NIGHTLY Rate - Assuming structure from Cashier_module.md #}
+                    <div style="margin-left: 20px; margin-bottom:15px; border-left: 2px solid #eee; padding-left:15px;">
+                        <h4>Nightly Rate (Estadía Nocturna)</h4>
+                        <label for="{{ vehicle_type_code }}_NIGHTLY_base_value">Base Value (ARS):</label>
+                        <input type="number" step="any" id="{{ vehicle_type_code }}_NIGHTLY_base_value" 
+                               name="{{ vehicle_type_code }}_NIGHTLY_base_value" 
+                               value="{{ data.rates.get('NIGHTLY', {}).get('base_value', 0) }}">
+                        <label for="{{ vehicle_type_code }}_NIGHTLY_start_time">Start Time (HH:MM):</label>
+                        <input type="text" id="{{ vehicle_type_code }}_NIGHTLY_start_time" 
+                               name="{{ vehicle_type_code }}_NIGHTLY_start_time" 
+                               value="{{ data.rates.get('NIGHTLY', {}).get('start_time', '21:00') }}">
+                        <label for="{{ vehicle_type_code }}_NIGHTLY_end_time">End Time (HH:MM):</label>
+                        <input type="text" id="{{ vehicle_type_code }}_NIGHTLY_end_time" 
+                               name="{{ vehicle_type_code }}_NIGHTLY_end_time" 
+                               value="{{ data.rates.get('NIGHTLY', {}).get('end_time', '09:00') }}">
+                    </div>
+
+                    {# Monthly Abono Base Fee #}
+                     <div style="margin-left: 20px; margin-bottom:15px; border-left: 2px solid #eee; padding-left:15px;">
+                        <h4>Monthly Abono (Pass)</h4>
+                        <label for="{{ vehicle_type_code }}_abono_monthly_base_fee">Base Monthly Fee (ARS):</label>
+                        <input type="number" step="any" id="{{ vehicle_type_code }}_abono_monthly_base_fee" 
+                               name="{{ vehicle_type_code }}_abono_monthly_base_fee" 
+                               value="{{ data.abono_monthly_base_fee | default(0) }}">
+                    </div>
+                </fieldset>
+                {% endfor %}
+                <div class="form-actions">
+                    <input type="submit" value="Update All Base Rates">
+                </div>
+            </form>
+            {% else %}
+            <p>Rate configurations could not be loaded. Ensure cashier service is running and accessible.</p>
+            {% endif %}
+        </div>
+        
+        <div class="settings-section">
+            <h2>Monthly Abono (Pass) Management</h2>
+            <p><em>(Abono management UI will be developed here. Admins will be able to add/remove/update monthly pass holders.)</em></p>
+            {# Placeholder for abono management forms #}
+        </div>
+
+    </div>
+</body>
+</html>
