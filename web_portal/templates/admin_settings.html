@@ -83,6 +83,26 @@
                 </div>
             </form>
         </div>
+
+        <div class="settings-section">
+            <h2>Plate Detection Cooldown</h2>
+            <form method="POST" action="{{ url_for('update_plate_cooldown') }}"> {# New route needed #}
+                <div>
+                    <label for="plate_cooldown_seconds">Cooldown Time (seconds):</label>
+                    <input type="number" id="plate_cooldown_seconds" name="plate_cooldown_seconds" 
+                           value="{{ current_plate_cooldown_seconds | default(300) }}" min="0" required>
+                    {% if plate_cooldown_last_updated %}
+                    <p><small>Current setting: <strong>{{ current_plate_cooldown_seconds }} seconds</strong> (Last updated: {{ plate_cooldown_last_updated }})</small></p>
+                    {% else %}
+                    <p><small>Current setting: <strong>{{ current_plate_cooldown_seconds | default(300) }} seconds</strong> (Not yet set or unable to retrieve last update time)</small></p>
+                    {% endif %}
+                    <p><small><em>Time in seconds to wait before processing the same plate again by the same camera. ANPR service restart required for changes to take effect.</em></small></p>
+                </div>
+                <div class="form-actions">
+                    <input type="submit" value="Update Cooldown">
+                </div>
+            </form>
+        </div>
         
         <div class="settings-section">
             <h2>Base Rate Configuration</h2>

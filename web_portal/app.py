@@ -19,6 +19,7 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'super_secret_key_for_dev_on
 MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/')
 DB_NAME = 'anpr_db'
 DEFAULT_OPERATIONAL_TIMEZONE = "UTC" # Fallback timezone
+DEFAULT_PLATE_COOLDOWN_SECONDS = 300 # Fallback cooldown
 
 DETECTIONS_COLLECTION_NAME = 'detections'
 VIDEO_JOBS_COLLECTION_NAME = 'video_jobs'
@@ -129,24 +130,12 @@ def allowed_file(filename): return '.' in filename and filename.rsplit('.', 1)[1
 @app.route('/')
 @login_required
 def index():
-    # Remove raw detections fetching from index, it's on its own page now
     stream_configs, parking_sessions, error_message = [], [], None
     plate_query_sessions = request.args.get('plate_query_sessions', '').strip()
     app.logger.debug(f"Index route: plate_query_sessions = '{plate_query_sessions}'")
 
     if client is None: error_message = "MongoDB connection failed. Data cannot be loaded."
     else:
-        # Raw detections are no longer fetched here
-        # try:
-        #     if detections_collection is not None:
-        #         detections_cursor = detections_collection.find().sort("timestamp", -1).limit(50)
-        #         for doc in detections_cursor:
-        #             entry_path = doc.get('image_path')
-        #             if entry_path and isinstance(entry_path, str):
-        #                 doc['image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
-        #             detections.append(doc)
-        # except Exception as e: app.logger.error(f"Error fetching raw detections: {e}"); error_message = (error_message or "") + "Error fetching raw detections."
-        
         try:
             if parking_sessions_collection is not None:
                 session_filter = {}
@@ -166,7 +155,6 @@ def index():
                 
                 if plate_query_sessions and not parking_sessions:
                      flash(f"No parking sessions found matching plate '{plate_query_sessions}'.", "info")
-
         except Exception as e: app.logger.error(f"Error fetching parking sessions: {e}", exc_info=True); error_message = (error_message or "") + "Error fetching parking sessions."
         
         try:
@@ -178,7 +166,7 @@ def index():
                            parking_sessions=parking_sessions, 
                            error_message=error_message, 
                            current_user=current_user,
-                           plate_query_sessions=plate_query_sessions) # Pass query back
+                           plate_query_sessions=plate_query_sessions)
 
 @app.route('/upload', methods=['POST'])
 @login_required
@@ -243,46 +231,27 @@ def get_configured_timezone_str():
         app.logger.warning("Could not fetch timezone from cashier-service, defaulting to UTC.")
     return DEFAULT_OPERATIONAL_TIMEZONE
 
-# Custom Jinja2 filter for local time display
-def format_datetime_local(utc_dt, format_str='%Y-%m-%d %H:%M:%S'): # Renamed format to format_str
+def format_datetime_local(utc_dt, format_str='%Y-%m-%d %H:%M:%S'):
     if not utc_dt:
         return 'N/A'
-    
-    # Log initial state of utc_dt
-    # app.logger.debug(f"format_datetime_local: Received utc_dt = {utc_dt}, type = {type(utc_dt)}, tzinfo = {utc_dt.tzinfo if hasattr(utc_dt, 'tzinfo') else 'N/A'}")
-
     try:
-        original_utc_dt_repr = repr(utc_dt) # For logging before modification
-
+        original_utc_dt_repr = repr(utc_dt)
         if not isinstance(utc_dt, datetime):
             app.logger.warning(f"format_datetime_local: Received non-datetime object: {utc_dt} (type: {type(utc_dt)})")
-            return str(utc_dt) # Or some error string
-
-        # Ensure utc_dt is timezone-aware and set to UTC
+            return str(utc_dt)
         if utc_dt.tzinfo is None:
             utc_dt_aware = pytz.utc.localize(utc_dt)
-            # app.logger.debug(f"format_datetime_local: Localized naive dt {original_utc_dt_repr} to aware UTC: {utc_dt_aware}")
         else:
             utc_dt_aware = utc_dt.astimezone(pytz.utc)
-            # if utc_dt_aware != utc_dt: # Log if conversion happened
-                # app.logger.debug(f"format_datetime_local: Converted aware dt {original_utc_dt_repr} to UTC: {utc_dt_aware}")
-
         target_tz_str = get_configured_timezone_str() 
-        # app.logger.debug(f"format_datetime_local: Target timezone string from helper: '{target_tz_str}'")
-        
         target_tz = pytz.timezone(target_tz_str)
         local_dt = utc_dt_aware.astimezone(target_tz)
-        
-        # app.logger.debug(f"format_datetime_local: Converted {utc_dt_aware} to local_dt {local_dt} ({target_tz_str})")
-        
         return local_dt.strftime(format_str)
     except Exception as e:
         app.logger.error(f"Error formatting datetime '{original_utc_dt_repr if 'original_utc_dt_repr' in locals() else utc_dt}' to local: {e}", exc_info=True)
-        # Fallback to UTC display if conversion fails, indicating it's UTC. Ensure utc_dt is a datetime object for strftime.
         if isinstance(utc_dt, datetime):
             return utc_dt.strftime(format_str) + " (UTC)"
         return str(utc_dt) + " (Error - UTC)"
-
 
 app.jinja_env.filters['datetime_local'] = format_datetime_local
 
@@ -324,7 +293,7 @@ def edit_session(session_id):
             except pytz.exceptions.UnknownTimeZoneError:
                 flash(f"Server configuration error: Unknown timezone '{configured_tz_str}'. Using UTC for exit time.", 'error')
                 update_fields['exit_timestamp'] = naive_exit_dt # Fallback
-        elif new_status == 'exited': # Exit time required if status is 'exited' and no timestamp provided
+        elif new_status == 'exited': 
             flash('Exit timestamp required for "exited" status.', 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI)
         
         if new_status == 'inside': 
@@ -340,8 +309,7 @@ def edit_session(session_id):
         else: flash('No changes submitted.', 'info')
         
         session_data_updated_post = parking_sessions_collection.find_one({'_id': session_obj_id}) 
-        if session_data_updated_post: session_for_template = dict(session_data_updated_post) # Re-assign for re-render
-        # Re-prepare image URLs if needed for re-render
+        if session_data_updated_post: session_for_template = dict(session_data_updated_post) 
         if session_for_template.get('entry_image_path'): session_for_template['entry_image_url'] = url_for('static', filename=session_for_template['entry_image_path'][1:] if session_for_template['entry_image_path'].startswith('/') else session_for_template['entry_image_path'])
         if session_for_template.get('exit_image_path'): session_for_template['exit_image_url'] = url_for('static', filename=session_for_template['exit_image_path'][1:] if session_for_template['exit_image_path'].startswith('/') else session_for_template['exit_image_path'])
 
@@ -442,6 +410,8 @@ def admin_settings():
     inflation_last_updated = "N/A"
     current_operational_timezone = DEFAULT_OPERATIONAL_TIMEZONE
     operational_timezone_last_updated = "N/A"
+    current_plate_cooldown_seconds = DEFAULT_PLATE_COOLDOWN_SECONDS 
+    plate_cooldown_last_updated = "N/A"
     all_rates_data = {}
 
     try:
@@ -473,6 +443,20 @@ def admin_settings():
     except requests.exceptions.RequestException: flash("Could not load operational timezone: cashier service unavailable.", "warning")
 
     try:
+        response_cooldown = requests.get('http://cashier-service:5001/api/settings/plate-cooldown', timeout=5)
+        if response_cooldown.status_code == 200:
+            data_cooldown = response_cooldown.json()
+            current_plate_cooldown_seconds = data_cooldown.get('cooldown_seconds', DEFAULT_PLATE_COOLDOWN_SECONDS)
+            last_updated_ts_cooldown = data_cooldown.get('last_updated')
+            if last_updated_ts_cooldown:
+                try:
+                    dt_obj_cooldown = datetime.fromisoformat(last_updated_ts_cooldown.replace("Z", "+00:00")) if isinstance(last_updated_ts_cooldown, str) else datetime.fromtimestamp(last_updated_ts_cooldown) if isinstance(last_updated_ts_cooldown, (int, float)) else None
+                    if dt_obj_cooldown: plate_cooldown_last_updated = dt_obj_cooldown.strftime('%Y-%m-%d %H:%M:%S UTC')
+                except Exception: plate_cooldown_last_updated = str(last_updated_ts_cooldown)
+        else: flash(f"Error fetching plate cooldown: {response_cooldown.status_code}", "error")
+    except requests.exceptions.RequestException: flash("Could not load plate cooldown: cashier service unavailable.", "warning")
+
+    try:
         response_rates = requests.get('http://cashier-service:5001/api/rates', timeout=5)
         if response_rates.status_code == 200: all_rates_data = response_rates.json()
         else: flash(f"Error fetching base rates: {response_rates.status_code}", "error")
@@ -483,7 +467,10 @@ def admin_settings():
                            inflation_last_updated=inflation_last_updated,
                            all_rates=all_rates_data,
                            current_operational_timezone=current_operational_timezone,
-                           operational_timezone_last_updated=operational_timezone_last_updated)
+                           operational_timezone_last_updated=operational_timezone_last_updated,
+                           current_plate_cooldown_seconds=current_plate_cooldown_seconds,
+                           plate_cooldown_last_updated=plate_cooldown_last_updated
+                           )
 
 @app.route('/admin/update_inflation_factor', methods=['POST'])
 @login_required
@@ -520,6 +507,35 @@ def update_operational_timezone():
         else: flash(f"Failed to update timezone: {response.json().get('error', response.text)}", "error")
     except requests.exceptions.RequestException: flash("Could not update timezone: cashier service unavailable.", "error")
     except Exception as e: app.logger.error(f"Error updating timezone: {e}", exc_info=True); flash("Unexpected error.", "error")
+    return redirect(url_for('admin_settings'))
+
+@app.route('/admin/update_plate_cooldown', methods=['POST'])
+@login_required
+@roles_required(['admin'])
+def update_plate_cooldown():
+    new_cooldown_str = request.form.get('plate_cooldown_seconds')
+    try:
+        new_cooldown = int(new_cooldown_str)
+        if new_cooldown < 0:
+            flash("Plate cooldown must be a non-negative integer.", "error")
+        else:
+            try:
+                api_url = 'http://cashier-service:5001/api/settings/plate-cooldown'
+                response = requests.post(api_url, json={'cooldown_seconds': new_cooldown}, timeout=5)
+                if response.status_code == 200:
+                    flash("Plate detection cooldown updated. ANPR service restart required for changes to take effect.", "success")
+                    app.logger.info(f"Admin updated plate cooldown to: {new_cooldown} seconds.")
+                else:
+                    error_detail = response.json().get('error', response.text) if response.content else response.reason
+                    flash(f"Failed to update plate cooldown via cashier service: {error_detail}", "error")
+            except requests.exceptions.RequestException as e:
+                app.logger.error(f"Could not connect to cashier-service to update plate cooldown: {e}")
+                flash("Could not update plate cooldown: cashier service unavailable.", "error")
+    except ValueError:
+        flash("Invalid number format for plate cooldown.", "error")
+    except Exception as e:
+        app.logger.error(f"Error updating plate cooldown: {e}", exc_info=True)
+        flash("An unexpected error occurred while updating plate cooldown.", "error")
     return redirect(url_for('admin_settings'))
 
 @app.route('/admin/update_base_rates', methods=['POST'])
@@ -619,8 +635,6 @@ def raw_detections_list():
             
             if plate_query and not detections:
                 flash(f"No detections found matching '{plate_query}'. Displaying latest if any.", "info")
-                # Optionally, if query and no results, could clear filter and show latest
-                # For now, it will just show an empty table if query yields no results.
 
         except Exception as e:
             app.logger.error(f"Error fetching raw detections for dedicated page: {e}", exc_info=True)
@@ -631,7 +645,7 @@ def raw_detections_list():
                            detections=detections, 
                            error_message=error_message, 
                            current_user=current_user,
-                           plate_query=plate_query) # Pass query back to template
+                           plate_query=plate_query) 
 
 if __name__ == '__main__':
     if not os.path.exists(PATH_FOR_WEBPORTAL_SAVE):

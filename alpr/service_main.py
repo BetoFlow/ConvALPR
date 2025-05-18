@@ -6,6 +6,7 @@ import logging
 import pymongo # For sort order
 from datetime import datetime # For updating job timestamps
 from alpr import ALPR # Assuming ALPR class is in alpr.py
+import requests # For fetching config from cashier_service
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(threadName)s - %(message)s')
@@ -37,6 +38,8 @@ DEFAULT_LOG_RAW_DETECTIONS = True
 DEFAULT_PLATE_COOLDOWN_SECONDS = 300 # New: Default 5 minutes (300 seconds)
 
 # Global ALPR instance (shared by threads, if its methods are thread-safe)
+CASHIER_SERVICE_BASE_URL = os.environ.get("CASHIER_SERVICE_URL", "http://cashier-service:5001")
+
 # MongoSaver part of ALPR should handle concurrent calls to add_detection_record if it uses thread-safe list appends
 # or if each thread gets its own ALPR instance (safer but more memory).
 # For now, let's assume ALPR's process_frame is okay to be called, and MongoSaver's batching is okay.
@@ -268,8 +271,21 @@ def main():
     mongo_insert_freq = get_env_var(ENV_MONGO_INSERT_FREQ, DEFAULT_MONGO_INSERT_FREQ, int)
     inference_freq = get_env_var(ENV_INFERENCE_FREQUENCY_FRAMES, DEFAULT_INFERENCE_FREQUENCY_FRAMES, int)
     log_raw_detections_flag = get_env_var(ENV_LOG_RAW_DETECTIONS, DEFAULT_LOG_RAW_DETECTIONS, bool)
-    plate_cooldown_seconds = get_env_var(ENV_PLATE_COOLDOWN_SECONDS, DEFAULT_PLATE_COOLDOWN_SECONDS, int)
+    # plate_cooldown_seconds = get_env_var(ENV_PLATE_COOLDOWN_SECONDS, DEFAULT_PLATE_COOLDOWN_SECONDS, int) # Replaced by API call
 
+    # Fetch plate cooldown from cashier-service
+    plate_cooldown_seconds = DEFAULT_PLATE_COOLDOWN_SECONDS
+    try:
+        cooldown_api_url = f"{CASHIER_SERVICE_BASE_URL}/api/settings/plate-cooldown"
+        response = requests.get(cooldown_api_url, timeout=5)
+        if response.status_code == 200:
+            plate_cooldown_seconds = int(response.json().get('cooldown_seconds', DEFAULT_PLATE_COOLDOWN_SECONDS))
+            logger.info(f"Fetched plate_cooldown_seconds from cashier-service: {plate_cooldown_seconds}s")
+        else:
+            logger.warning(f"Failed to fetch plate_cooldown_seconds from {cooldown_api_url} (status: {response.status_code}). Using default: {DEFAULT_PLATE_COOLDOWN_SECONDS}s")
+    except (requests.exceptions.RequestException, ValueError) as e:
+        logger.warning(f"Error fetching plate_cooldown_seconds: {e}. Using default: {DEFAULT_PLATE_COOLDOWN_SECONDS}s")
+    
     # Initialize MongoDB client and ALPR instance
     # ALPR class itself handles its Mongo connection for MongoSaver (for raw detections if enabled)
     # But we need a client/db object for the job watcher and stream configs.

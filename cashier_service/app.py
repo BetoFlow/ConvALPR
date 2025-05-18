@@ -150,6 +150,57 @@ def set_operational_timezone():
         app.logger.error("Failed to update operational timezone in DB.")
         return jsonify({"error": "Failed to update operational timezone"}), 500
 
+# --- Plate Detection Cooldown Management ---
+PLATE_COOLDOWN_CONFIG_DOC_ID = "plate_cooldown_config"
+DEFAULT_PLATE_COOLDOWN_SECONDS = 300
+
+@app.route('/api/settings/plate-cooldown', methods=['GET'])
+def get_plate_cooldown():
+    if inflation_factors_collection is None: # Using this collection for general settings
+        return jsonify({"error": "Database not connected"}), 500
+    
+    cooldown_doc = inflation_factors_collection.find_one({"_id": PLATE_COOLDOWN_CONFIG_DOC_ID})
+    if cooldown_doc and "cooldown_seconds" in cooldown_doc:
+        return jsonify({
+            "cooldown_seconds": cooldown_doc.get("cooldown_seconds"), 
+            "last_updated": cooldown_doc.get("last_updated")
+        }), 200
+    else:
+        return jsonify({
+            "cooldown_seconds": DEFAULT_PLATE_COOLDOWN_SECONDS, 
+            "last_updated": None, 
+            "message": "Cooldown not set, returning default."
+        }), 200
+
+@app.route('/api/settings/plate-cooldown', methods=['POST'])
+def set_plate_cooldown():
+    if inflation_factors_collection is None:
+        return jsonify({"error": "Database not connected"}), 500
+    
+    data = request.get_json()
+    if not data or 'cooldown_seconds' not in data:
+        return jsonify({"error": "Missing 'cooldown_seconds' in request body"}), 400
+    
+    try:
+        new_cooldown = int(data['cooldown_seconds'])
+        if new_cooldown < 0: # Allow 0 for no cooldown
+            return jsonify({"error": "Cooldown must be a non-negative integer"}), 400
+    except ValueError:
+        return jsonify({"error": "Cooldown must be a valid integer"}), 400
+    
+    update_result = inflation_factors_collection.update_one(
+        {"_id": PLATE_COOLDOWN_CONFIG_DOC_ID},
+        {"$set": {"cooldown_seconds": new_cooldown, "last_updated": datetime.utcnow()}},
+        upsert=True
+    )
+    
+    if update_result.acknowledged:
+        app.logger.info(f"Plate detection cooldown updated to: {new_cooldown} seconds")
+        return jsonify({"message": "Plate cooldown updated successfully", "new_cooldown_seconds": new_cooldown}), 200
+    else:
+        app.logger.error("Failed to update plate cooldown in DB.")
+        return jsonify({"error": "Failed to update plate cooldown"}), 500
+
 # --- Base Rate Management ---
 # Structure per vehicle type in 'rate_configs' collection:
 # { "_id": "CAR_SUV", "vehicle_type_label": "Car/SUV", 
