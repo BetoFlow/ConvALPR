@@ -254,6 +254,8 @@ def format_datetime_local(utc_dt, format_str='%Y-%m-%d %H:%M:%S'):
         return str(utc_dt) + " (Error - UTC)"
 
 app.jinja_env.filters['datetime_local'] = format_datetime_local
+app.jinja_env.globals['get_configured_timezone_str'] = get_configured_timezone_str # Make it a global for templates
+app.jinja_env.globals['pytz'] = pytz # Make pytz available if needed, though direct use in template is complex
 
 @app.route('/edit_session/<session_id>', methods=['GET', 'POST'])
 @login_required
@@ -268,7 +270,28 @@ def edit_session(session_id):
     session_for_template = dict(session_data) 
     if session_for_template.get('entry_image_path'): session_for_template['entry_image_url'] = url_for('static', filename=session_for_template['entry_image_path'][1:] if session_for_template['entry_image_path'].startswith('/') else session_for_template['entry_image_path'])
     if session_for_template.get('exit_image_path'): session_for_template['exit_image_url'] = url_for('static', filename=session_for_template['exit_image_path'][1:] if session_for_template['exit_image_path'].startswith('/') else session_for_template['exit_image_path'])
-        
+    
+    formatted_exit_time_for_input = ""
+    if session_for_template.get('exit_timestamp'):
+        try:
+            utc_exit_dt = session_for_template['exit_timestamp']
+            if utc_exit_dt.tzinfo is None: # Ensure it's aware
+                utc_exit_dt = pytz.utc.localize(utc_exit_dt)
+            else:
+                utc_exit_dt = utc_exit_dt.astimezone(pytz.utc)
+            
+            target_tz_str = get_configured_timezone_str()
+            target_tz = pytz.timezone(target_tz_str)
+            local_exit_dt = utc_exit_dt.astimezone(target_tz)
+            formatted_exit_time_for_input = local_exit_dt.strftime('%Y-%m-%dT%H:%M')
+        except Exception as e:
+            app.logger.error(f"Error pre-formatting exit_timestamp for edit form: {e}")
+            # Fallback or leave empty if error
+            if session_for_template.get('exit_timestamp'): # if original timestamp exists
+                 formatted_exit_time_for_input = session_for_template['exit_timestamp'].strftime('%Y-%m-%dT%H:%M') # Naive UTC as fallback for input
+                 flash("Error converting exit time to local for editing; displaying as UTC. Save will re-localize.", "warning")
+
+
     if request.method == 'POST':
         new_status = request.form.get('status'); new_exit_timestamp_str = request.form.get('exit_timestamp')
         new_vehicle_type = request.form.get('vehicle_type')
@@ -312,8 +335,25 @@ def edit_session(session_id):
         if session_data_updated_post: session_for_template = dict(session_data_updated_post) 
         if session_for_template.get('entry_image_path'): session_for_template['entry_image_url'] = url_for('static', filename=session_for_template['entry_image_path'][1:] if session_for_template['entry_image_path'].startswith('/') else session_for_template['entry_image_path'])
         if session_for_template.get('exit_image_path'): session_for_template['exit_image_url'] = url_for('static', filename=session_for_template['exit_image_path'][1:] if session_for_template['exit_image_path'].startswith('/') else session_for_template['exit_image_path'])
+        # Need to re-calculate formatted_exit_time_for_input if POST fails and re-renders
+        if session_for_template.get('exit_timestamp'):
+            try:
+                utc_exit_dt = session_for_template['exit_timestamp']
+                if utc_exit_dt.tzinfo is None: utc_exit_dt = pytz.utc.localize(utc_exit_dt)
+                else: utc_exit_dt = utc_exit_dt.astimezone(pytz.utc)
+                target_tz_str_post = get_configured_timezone_str()
+                target_tz_post = pytz.timezone(target_tz_str_post)
+                local_exit_dt_post = utc_exit_dt.astimezone(target_tz_post)
+                formatted_exit_time_for_input = local_exit_dt_post.strftime('%Y-%m-%dT%H:%M')
+            except Exception: # simplified error handling for re-render
+                 if session_for_template.get('exit_timestamp'):
+                    formatted_exit_time_for_input = session_for_template['exit_timestamp'].strftime('%Y-%m-%dT%H:%M')
 
-    return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI)
+
+    return render_template('edit_session.html', 
+                           session=session_for_template, 
+                           vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI,
+                           formatted_exit_time_for_input=formatted_exit_time_for_input)
 
 @app.route('/users', methods=['GET'])
 @login_required

@@ -59,7 +59,9 @@
                         <td>{{ detection_doc.camera_id if detection_doc.camera_id else 'N/A' }}</td>
                         <td>
                             {% if detection_doc.image_url %}
-                                <img src="{{ detection_doc.image_url }}" alt="Detection Image">
+                                <a href="{{ detection_doc.image_url }}" target="_blank">
+                                    <img src="{{ detection_doc.image_url }}" alt="Detection Image">
+                                </a>
                             {% else %}
                                 No Image
                             {% endif %}

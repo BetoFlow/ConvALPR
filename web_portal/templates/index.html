@@ -158,7 +158,9 @@
                     <td>{{ session.entry_camera_id|default('N/A') }}</td>
                     <td>
                         {% if session.entry_image_url %}
-                            <img src="{{ session.entry_image_url }}" alt="Entry Image">
+                            <a href="{{ session.entry_image_url }}" target="_blank">
+                                <img src="{{ session.entry_image_url }}" alt="Entry Image">
+                            </a>
                         {% else %}
                             No Image
                         {% endif %}
@@ -167,7 +169,9 @@
                     <td>{{ session.exit_camera_id|default('N/A') }}</td>
                     <td>
                         {% if session.exit_image_url %}
-                            <img src="{{ session.exit_image_url }}" alt="Exit Image">
+                            <a href="{{ session.exit_image_url }}" target="_blank">
+                                <img src="{{ session.exit_image_url }}" alt="Exit Image">
+                            </a>
                         {% else %}
                             No Image
                         {% endif %}
