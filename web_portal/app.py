@@ -129,22 +129,32 @@ def allowed_file(filename): return '.' in filename and filename.rsplit('.', 1)[1
 @app.route('/')
 @login_required
 def index():
-    detections, stream_configs, parking_sessions, error_message = [], [], [], None
+    # Remove raw detections fetching from index, it's on its own page now
+    stream_configs, parking_sessions, error_message = [], [], None
+    plate_query_sessions = request.args.get('plate_query_sessions', '').strip()
+    app.logger.debug(f"Index route: plate_query_sessions = '{plate_query_sessions}'")
+
     if client is None: error_message = "MongoDB connection failed. Data cannot be loaded."
     else:
-        try:
-            if detections_collection is not None:
-                detections_cursor = detections_collection.find().sort("timestamp", -1).limit(50)
-                for doc in detections_cursor:
-                    entry_path = doc.get('image_path')
-                    if entry_path and isinstance(entry_path, str):
-                        doc['image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
-                    detections.append(doc)
-        except Exception as e: app.logger.error(f"Error fetching raw detections: {e}"); error_message = (error_message or "") + "Error fetching raw detections."
+        # Raw detections are no longer fetched here
+        # try:
+        #     if detections_collection is not None:
+        #         detections_cursor = detections_collection.find().sort("timestamp", -1).limit(50)
+        #         for doc in detections_cursor:
+        #             entry_path = doc.get('image_path')
+        #             if entry_path and isinstance(entry_path, str):
+        #                 doc['image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
+        #             detections.append(doc)
+        # except Exception as e: app.logger.error(f"Error fetching raw detections: {e}"); error_message = (error_message or "") + "Error fetching raw detections."
         
         try:
             if parking_sessions_collection is not None:
-                sessions_cursor = parking_sessions_collection.find().sort("entry_timestamp", -1).limit(50)
+                session_filter = {}
+                if plate_query_sessions:
+                    session_filter['plate_number'] = {"$regex": plate_query_sessions, "$options": "i"}
+                app.logger.debug(f"Index route: Applying session_filter = {session_filter}")
+                
+                sessions_cursor = parking_sessions_collection.find(session_filter).sort("entry_timestamp", -1).limit(50)
                 for s in sessions_cursor:
                     entry_path = s.get('entry_image_path')
                     if entry_path and isinstance(entry_path, str): s['entry_image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
@@ -153,13 +163,22 @@ def index():
                     if s.get('status') == 'exited' and s.get('entry_timestamp') and s.get('exit_timestamp'): s['duration_str'] = str(s['exit_timestamp'] - s['entry_timestamp']).split('.')[0]
                     else: s['duration_str'] = "N/A"
                     parking_sessions.append(s)
+                
+                if plate_query_sessions and not parking_sessions:
+                     flash(f"No parking sessions found matching plate '{plate_query_sessions}'.", "info")
+
         except Exception as e: app.logger.error(f"Error fetching parking sessions: {e}", exc_info=True); error_message = (error_message or "") + "Error fetching parking sessions."
         
         try:
             if stream_configs_collection is not None: stream_configs = list(stream_configs_collection.find().sort("name", 1))
         except Exception as e: app.logger.error(f"Error fetching stream configs: {e}"); error_message = (error_message or "") + "Error fetching stream configs."
             
-    return render_template('index.html', detections=detections, stream_configs=stream_configs, parking_sessions=parking_sessions, error_message=error_message, current_user=current_user)
+    return render_template('index.html', 
+                           stream_configs=stream_configs, 
+                           parking_sessions=parking_sessions, 
+                           error_message=error_message, 
+                           current_user=current_user,
+                           plate_query_sessions=plate_query_sessions) # Pass query back
 
 @app.route('/upload', methods=['POST'])
 @login_required
@@ -228,32 +247,42 @@ def get_configured_timezone_str():
 def format_datetime_local(utc_dt, format_str='%Y-%m-%d %H:%M:%S'): # Renamed format to format_str
     if not utc_dt:
         return 'N/A'
+    
+    # Log initial state of utc_dt
+    # app.logger.debug(f"format_datetime_local: Received utc_dt = {utc_dt}, type = {type(utc_dt)}, tzinfo = {utc_dt.tzinfo if hasattr(utc_dt, 'tzinfo') else 'N/A'}")
+
     try:
-        # Ensure utc_dt is timezone-aware (UTC)
-        # MongoDB stores naive datetimes as UTC by default with PyMongo
-        # If it's already aware, astimezone(pytz.utc) handles it.
-        # If it's naive, assume it's UTC.
+        original_utc_dt_repr = repr(utc_dt) # For logging before modification
+
+        if not isinstance(utc_dt, datetime):
+            app.logger.warning(f"format_datetime_local: Received non-datetime object: {utc_dt} (type: {type(utc_dt)})")
+            return str(utc_dt) # Or some error string
+
+        # Ensure utc_dt is timezone-aware and set to UTC
         if utc_dt.tzinfo is None:
-            utc_dt = pytz.utc.localize(utc_dt)
+            utc_dt_aware = pytz.utc.localize(utc_dt)
+            # app.logger.debug(f"format_datetime_local: Localized naive dt {original_utc_dt_repr} to aware UTC: {utc_dt_aware}")
         else:
-            utc_dt = utc_dt.astimezone(pytz.utc)
+            utc_dt_aware = utc_dt.astimezone(pytz.utc)
+            # if utc_dt_aware != utc_dt: # Log if conversion happened
+                # app.logger.debug(f"format_datetime_local: Converted aware dt {original_utc_dt_repr} to UTC: {utc_dt_aware}")
 
         target_tz_str = get_configured_timezone_str() 
+        # app.logger.debug(f"format_datetime_local: Target timezone string from helper: '{target_tz_str}'")
+        
         target_tz = pytz.timezone(target_tz_str)
-        local_dt = utc_dt.astimezone(target_tz)
+        local_dt = utc_dt_aware.astimezone(target_tz)
         
-        # Try to get a more human-friendly part of the timezone name
-        tz_display_name = target_tz_str
-        if '/' in target_tz_str:
-            # This was for display name, not needed now in the string
-            # tz_display_name = target_tz_str.split('/')[-1].replace('_', ' ')
-            pass
+        # app.logger.debug(f"format_datetime_local: Converted {utc_dt_aware} to local_dt {local_dt} ({target_tz_str})")
         
-        return local_dt.strftime(format_str) # Removed timezone name from output
+        return local_dt.strftime(format_str)
     except Exception as e:
-        app.logger.error(f"Error formatting datetime to local: {utc_dt} - {e}", exc_info=True)
-        # Fallback to UTC display if conversion fails, indicating it's UTC
-        return utc_dt.strftime(format_str) + " (UTC)"
+        app.logger.error(f"Error formatting datetime '{original_utc_dt_repr if 'original_utc_dt_repr' in locals() else utc_dt}' to local: {e}", exc_info=True)
+        # Fallback to UTC display if conversion fails, indicating it's UTC. Ensure utc_dt is a datetime object for strftime.
+        if isinstance(utc_dt, datetime):
+            return utc_dt.strftime(format_str) + " (UTC)"
+        return str(utc_dt) + " (Error - UTC)"
+
 
 app.jinja_env.filters['datetime_local'] = format_datetime_local
 
@@ -560,6 +589,49 @@ def process_payment(session_id):
     if error_calculating_charge: flash(f"Error from cashier service: {error_calculating_charge}", "error")
     
     return render_template('process_payment.html', session=session_data, charge_info=charge_info, error_calculating_charge=error_calculating_charge)
+
+@app.route('/raw_detections')
+@login_required
+@roles_required(['admin', 'technical', 'supervisor'])
+def raw_detections_list():
+    detections = []
+    error_message = None
+    plate_query = request.args.get('plate_query', '').strip()
+    
+    if client is None or detections_collection is None:
+        error_message = "MongoDB connection or detections collection not available."
+        flash(error_message, "error")
+    else:
+        try:
+            mongo_filter = {}
+            if plate_query:
+                # Case-insensitive partial match
+                mongo_filter['plate_number'] = {"$regex": plate_query, "$options": "i"}
+            
+            detections_cursor = detections_collection.find(mongo_filter).sort("timestamp", -1).limit(50) # Still limit results
+            for doc in detections_cursor:
+                entry_path = doc.get('image_path')
+                if entry_path and isinstance(entry_path, str):
+                    doc['image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
+                else:
+                    doc['image_url'] = None # Ensure image_url key exists
+                detections.append(doc)
+            
+            if plate_query and not detections:
+                flash(f"No detections found matching '{plate_query}'. Displaying latest if any.", "info")
+                # Optionally, if query and no results, could clear filter and show latest
+                # For now, it will just show an empty table if query yields no results.
+
+        except Exception as e:
+            app.logger.error(f"Error fetching raw detections for dedicated page: {e}", exc_info=True)
+            error_message = "Error fetching raw detections."
+            flash(error_message, "error")
+            
+    return render_template('raw_detections.html', 
+                           detections=detections, 
+                           error_message=error_message, 
+                           current_user=current_user,
+                           plate_query=plate_query) # Pass query back to template
 
 if __name__ == '__main__':
     if not os.path.exists(PATH_FOR_WEBPORTAL_SAVE):

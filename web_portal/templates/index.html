@@ -46,6 +46,10 @@
             {% if current_user.has_role('admin') %}
             <a href="{{ url_for('admin_settings') }}" style="margin-left: 15px;">Admin Settings</a>
             {% endif %}
+            {# Add link to Raw Detections page - adjust roles as needed #}
+            {% if current_user.has_any_role(['admin', 'technical', 'supervisor']) %}
+            <a href="{{ url_for('raw_detections_list') }}" style="margin-left: 15px;">Raw Detections</a>
+            {% endif %}
             <a href="{{ url_for('logout') }}" style="margin-left: 15px;">Logout</a>
         {% else %}
             <a href="{{ url_for('login') }}">Login</a>
@@ -197,38 +201,6 @@
 
     <hr style="margin-top: 40px; margin-bottom: 30px;">
 
-    <h2 style="text-align: center;">Raw Detection Log (Last 50)</h2>
-    {% if detections and detections|length > 0 %}
-        <table>
-            <thead>
-                <tr>
-                    <th>Timestamp</th>
-                    <th>Plate Number</th>
-                    <th>Confidence</th>
-                    <th>Camera ID</th>
-                    <th>Image</th>
-                </tr>
-            </thead>
-            <tbody>
-                {% for detection_doc in detections %} {# Changed loop variable name #}
-                <tr>
-                    <td>{{ detection_doc.timestamp | datetime_local if detection_doc.timestamp else 'N/A' }}</td>
-                    <td>{{ detection_doc.plate_number if detection_doc.plate_number else 'N/A' }}</td>
-                    <td>{{ "%.2f"|format(detection_doc.confidence) if detection_doc.confidence else 'N/A' }}%</td>
-                    <td>{{ detection_doc.camera_id if detection_doc.camera_id else 'N/A' }}</td>
-                    <td>
-                        {% if detection_doc.image_url %}
-                            <img src="{{ detection_doc.image_url }}" alt="Detection Image">
-                        {% else %}
-                            No Image
-                        {% endif %}
-                    </td>
-                </tr>
-                {% endfor %}
-            </tbody>
-        </table>
-    {% elif not error_message %}
-        <p class="no-detections">No detections found.</p>
-    {% endif %}
+    {# Raw Detection Log section removed from here #}
 </body>
 </html>
