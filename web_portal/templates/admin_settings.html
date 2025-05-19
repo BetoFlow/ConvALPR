@@ -103,6 +103,26 @@
                 </div>
             </form>
         </div>
+
+        <div class="settings-section">
+            <h2>Payment Grace Period</h2>
+            <form method="POST" action="{{ url_for('update_grace_period') }}"> {# New route needed #}
+                <div>
+                    <label for="grace_period_seconds">Grace Period After Exit Detection (seconds):</label>
+                    <input type="number" id="grace_period_seconds" name="grace_period_seconds" 
+                           value="{{ current_grace_period_seconds | default(300) }}" min="0" required>
+                    {% if grace_period_last_updated %}
+                    <p><small>Current setting: <strong>{{ current_grace_period_seconds }} seconds</strong> (Last updated: {{ grace_period_last_updated }})</small></p>
+                    {% else %}
+                    <p><small>Current setting: <strong>{{ current_grace_period_seconds | default(300) }} seconds</strong> (Not yet set or unable to retrieve last update time)</small></p>
+                    {% endif %}
+                    <p><small><em>Time allowed for payment after a vehicle is detected at an exit.</em></small></p>
+                </div>
+                <div class="form-actions">
+                    <input type="submit" value="Update Grace Period">
+                </div>
+            </form>
+        </div>
         
         <div class="settings-section">
             <h2>Base Rate Configuration</h2>

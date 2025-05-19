@@ -135,7 +135,7 @@
             <thead>
                 <tr>
                     <th>Plate Number</th>
-                    <th>Status</th>
+                    <th>Session State</th>
                     <th>Entry Time</th>
                     <th>Entry Camera</th>
                     <th>Entry Image</th>
@@ -153,7 +153,7 @@
                 {% for session in parking_sessions %}
                 <tr>
                     <td>{{ session.plate_number }}</td>
-                    <td>{{ session.status|capitalize }}</td>
+                    <td>{{ session.session_state | default(session.status) | capitalize }}</td>
                     <td>{{ session.entry_timestamp | datetime_local if session.entry_timestamp else 'N/A' }}</td>
                     <td>{{ session.entry_camera_id|default('N/A') }}</td>
                     <td>
@@ -188,10 +188,17 @@
                     {% if current_user.is_authenticated and (current_user.has_role('admin') or current_user.has_role('supervisor')) %}
                     <td>
                         <a href="{{ url_for('edit_session', session_id=session._id|string) }}" style="margin-right: 5px;">Edit</a>
-                        {% if session.status == 'inside' and session.get('payment_status', 'unpaid') == 'unpaid' %}
+                        {% set current_session_state = session.session_state | default(session.status) %}
+                        {% if (current_session_state == 'VEHICLE_ENTERED' or current_session_state == 'AWAITING_PAYMENT_RESOLUTION') and session.get('payment_status', 'unpaid') == 'unpaid' %}
                             <a href="{{ url_for('process_payment', session_id=session._id|string) }}" style="background-color: #007bff; color:white; padding: 2px 5px; text-decoration: none; border-radius: 3px;">Pay</a>
-                        {% elif session.get('payment_status') == 'paid_pending_exit' %}
-                            <span style="color: green; font-weight: bold;">Paid</span>
+                        {% elif session.get('payment_status') == 'paid_pending_exit' or session.get('session_state') == 'PAID_AWAITING_EXIT' %}
+                            <span style="color: green; font-weight: bold;">Paid (Awaiting Exit)</span>
+                        {% elif session.get('session_state') == 'SESSION_CLOSED' and session.get('payment_status') == 'completed_paid' %}
+                             <span style="color: green; font-weight: bold;">Paid & Exited</span>
+                        {% elif session.get('session_state') == 'SESSION_UNPAID_TIMEOUT' or (session.get('session_state') == 'SESSION_CLOSED' and session.get('payment_status') == 'unpaid_timeout') %}
+                            <span style="color: red; font-weight: bold;">Unpaid (Timed Out)</span>
+                        {% elif session.get('payment_status') != 'unpaid' %}
+                             <span style="color: grey;">{{ session.payment_status | capitalize }}</span>
                         {% endif %}
                     </td>
                     {% endif %}

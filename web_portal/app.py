@@ -5,7 +5,7 @@ from werkzeug.utils import secure_filename
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 from bson.objectid import ObjectId
-from datetime import datetime
+from datetime import datetime, timedelta # Added timedelta
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_bcrypt import Bcrypt
 from functools import wraps
@@ -20,6 +20,7 @@ MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/')
 DB_NAME = 'anpr_db'
 DEFAULT_OPERATIONAL_TIMEZONE = "UTC" # Fallback timezone
 DEFAULT_PLATE_COOLDOWN_SECONDS = 300 # Fallback cooldown
+DEFAULT_GRACE_PERIOD_SECONDS = 300 # Default 5 minutes, matches cashier_service
 
 DETECTIONS_COLLECTION_NAME = 'detections'
 VIDEO_JOBS_COLLECTION_NAME = 'video_jobs'
@@ -136,6 +137,17 @@ def index():
 
     if client is None: error_message = "MongoDB connection failed. Data cannot be loaded."
     else:
+        # Fetch grace period for timeout checks
+        grace_period_seconds = DEFAULT_GRACE_PERIOD_SECONDS # from web_portal's own defaults
+        try:
+            response_grace = requests.get('http://cashier-service:5001/api/settings/grace-period', timeout=2)
+            if response_grace.status_code == 200:
+                grace_period_seconds = response_grace.json().get('grace_period_seconds', DEFAULT_GRACE_PERIOD_SECONDS)
+            else:
+                app.logger.warning(f"Index: Failed to fetch grace period, using default {DEFAULT_GRACE_PERIOD_SECONDS}s. Status: {response_grace.status_code}")
+        except requests.exceptions.RequestException:
+            app.logger.warning(f"Index: Could not connect to fetch grace period, using default {DEFAULT_GRACE_PERIOD_SECONDS}s.")
+
         try:
             if parking_sessions_collection is not None:
                 session_filter = {}
@@ -143,16 +155,64 @@ def index():
                     session_filter['plate_number'] = {"$regex": plate_query_sessions, "$options": "i"}
                 app.logger.debug(f"Index route: Applying session_filter = {session_filter}")
                 
-                sessions_cursor = parking_sessions_collection.find(session_filter).sort("entry_timestamp", -1).limit(50)
-                for s in sessions_cursor:
-                    entry_path = s.get('entry_image_path')
-                    if entry_path and isinstance(entry_path, str): s['entry_image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
-                    exit_path = s.get('exit_image_path')
-                    if exit_path and isinstance(exit_path, str): s['exit_image_url'] = url_for('static', filename=exit_path[1:] if exit_path.startswith('/') else exit_path)
-                    if s.get('status') == 'exited' and s.get('entry_timestamp') and s.get('exit_timestamp'): s['duration_str'] = str(s['exit_timestamp'] - s['entry_timestamp']).split('.')[0]
-                    else: s['duration_str'] = "N/A"
-                    parking_sessions.append(s)
+                # Fetch sessions that might need timeout check separately or process all and update
+                # For simplicity, fetch all matching current filter, then iterate and update if needed.
+                # This is not ideal for performance or for a GET request to modify data.
+                # A proper solution would use a background task.
+
+                sessions_cursor = parking_sessions_collection.find(session_filter).sort("entry_timestamp", -1).limit(100) # Fetch more to see effect of updates
                 
+                temp_parking_sessions = [] # Build a new list after potential updates
+                for s_doc in sessions_cursor:
+                    current_session_state = s_doc.get('session_state')
+                    exit_ts = s_doc.get('exit_timestamp')
+
+                    if current_session_state == 'AWAITING_PAYMENT_RESOLUTION' and exit_ts:
+                        grace_delta = timedelta(seconds=grace_period_seconds)
+                        # Ensure exit_ts is timezone-aware (UTC) if it's naive from DB
+                        aware_exit_ts = exit_ts
+                        if exit_ts.tzinfo is None:
+                            aware_exit_ts = pytz.utc.localize(exit_ts)
+                        
+                        if datetime.utcnow().replace(tzinfo=pytz.utc) > (aware_exit_ts + grace_delta):
+                            app.logger.info(f"Session {s_doc['_id']} timed out for payment. Updating state to SESSION_UNPAID_TIMEOUT.")
+                            timeout_update_fields = {
+                                'session_state': 'SESSION_UNPAID_TIMEOUT',
+                                'payment_status': 'unpaid_timeout', # New payment status
+                                # 'status': 'exited' # Keep status as is, or update based on policy
+                            }
+                            # Transition to SESSION_CLOSED with unpaid status
+                            # This could be a separate step or done here. For simplicity, let's do a soft timeout first.
+                            # To fully close:
+                            # timeout_update_fields['session_state'] = 'SESSION_CLOSED'
+                            # timeout_update_fields['status'] = 'exited' # Mark as exited if timed out at exit
+
+                            parking_sessions_collection.update_one({'_id': s_doc['_id']}, {'$set': timeout_update_fields})
+                            s_doc.update(timeout_update_fields) # Update local copy for display
+
+                    entry_path = s_doc.get('entry_image_path')
+                    if entry_path and isinstance(entry_path, str): s_doc['entry_image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
+                    exit_path = s_doc.get('exit_image_path')
+                    if exit_path and isinstance(exit_path, str): s_doc['exit_image_url'] = url_for('static', filename=exit_path[1:] if exit_path.startswith('/') else exit_path)
+                    
+                    # Duration calculation
+                    if s_doc.get('entry_timestamp'):
+                        end_time_for_duration = s_doc.get('exit_timestamp') or datetime.utcnow()
+                        if s_doc.get('session_state') == 'SESSION_CLOSED' and s_doc.get('exit_timestamp'):
+                             end_time_for_duration = s_doc.get('exit_timestamp')
+                        elif s_doc.get('session_state') == 'AWAITING_PAYMENT_RESOLUTION' and s_doc.get('exit_timestamp'):
+                             end_time_for_duration = s_doc.get('exit_timestamp') # Duration up to exit detection
+                        # else use current time for ongoing sessions
+
+                        duration_val = end_time_for_duration - s_doc.get('entry_timestamp')
+                        s_doc['duration_str'] = str(duration_val).split('.')[0] if duration_val.total_seconds() >=0 else "N/A"
+                    else:
+                        s_doc['duration_str'] = "N/A"
+
+                    temp_parking_sessions.append(s_doc)
+                
+                parking_sessions = temp_parking_sessions # Use the potentially updated list
+
                 if plate_query_sessions and not parking_sessions:
                      flash(f"No parking sessions found matching plate '{plate_query_sessions}'.", "info")
         except Exception as e: app.logger.error(f"Error fetching parking sessions: {e}", exc_info=True); error_message = (error_message or "") + "Error fetching parking sessions."
@@ -452,6 +512,8 @@ def admin_settings():
     operational_timezone_last_updated = "N/A"
     current_plate_cooldown_seconds = DEFAULT_PLATE_COOLDOWN_SECONDS 
     plate_cooldown_last_updated = "N/A"
+    current_grace_period_seconds = DEFAULT_GRACE_PERIOD_SECONDS # Default if not fetched
+    grace_period_last_updated = "N/A"
     all_rates_data = {}
 
     try:
@@ -497,6 +559,20 @@ def admin_settings():
     except requests.exceptions.RequestException: flash("Could not load plate cooldown: cashier service unavailable.", "warning")
 
     try:
+        response_grace = requests.get('http://cashier-service:5001/api/settings/grace-period', timeout=5)
+        if response_grace.status_code == 200:
+            data_grace = response_grace.json()
+            current_grace_period_seconds = data_grace.get('grace_period_seconds', DEFAULT_GRACE_PERIOD_SECONDS)
+            last_updated_ts_grace = data_grace.get('last_updated')
+            if last_updated_ts_grace:
+                try:
+                    dt_obj_grace = datetime.fromisoformat(last_updated_ts_grace.replace("Z", "+00:00")) if isinstance(last_updated_ts_grace, str) else datetime.fromtimestamp(last_updated_ts_grace) if isinstance(last_updated_ts_grace, (int, float)) else None
+                    if dt_obj_grace: grace_period_last_updated = dt_obj_grace.strftime('%Y-%m-%d %H:%M:%S UTC')
+                except Exception: grace_period_last_updated = str(last_updated_ts_grace)
+        else: flash(f"Error fetching grace period: {response_grace.status_code}", "error")
+    except requests.exceptions.RequestException: flash("Could not load grace period: cashier service unavailable.", "warning")
+
+    try:
         response_rates = requests.get('http://cashier-service:5001/api/rates', timeout=5)
         if response_rates.status_code == 200: all_rates_data = response_rates.json()
         else: flash(f"Error fetching base rates: {response_rates.status_code}", "error")
@@ -509,7 +585,9 @@ def admin_settings():
                            current_operational_timezone=current_operational_timezone,
                            operational_timezone_last_updated=operational_timezone_last_updated,
                            current_plate_cooldown_seconds=current_plate_cooldown_seconds,
-                           plate_cooldown_last_updated=plate_cooldown_last_updated
+                           plate_cooldown_last_updated=plate_cooldown_last_updated,
+                           current_grace_period_seconds=current_grace_period_seconds,
+                           grace_period_last_updated=grace_period_last_updated
                            )
 
 @app.route('/admin/update_inflation_factor', methods=['POST'])
@@ -576,6 +654,35 @@ def update_plate_cooldown():
     except Exception as e:
         app.logger.error(f"Error updating plate cooldown: {e}", exc_info=True)
         flash("An unexpected error occurred while updating plate cooldown.", "error")
+    return redirect(url_for('admin_settings'))
+
+@app.route('/admin/update_grace_period', methods=['POST'])
+@login_required
+@roles_required(['admin'])
+def update_grace_period():
+    new_grace_period_str = request.form.get('grace_period_seconds')
+    try:
+        new_grace_period = int(new_grace_period_str)
+        if new_grace_period < 0:
+            flash("Grace period must be a non-negative integer.", "error")
+        else:
+            try:
+                api_url = 'http://cashier-service:5001/api/settings/grace-period'
+                response = requests.post(api_url, json={'grace_period_seconds': new_grace_period}, timeout=5)
+                if response.status_code == 200:
+                    flash("Payment grace period updated successfully.", "success")
+                    app.logger.info(f"Admin updated grace period to: {new_grace_period} seconds.")
+                else:
+                    error_detail = response.json().get('error', response.text) if response.content else response.reason
+                    flash(f"Failed to update grace period via cashier service: {error_detail}", "error")
+            except requests.exceptions.RequestException as e:
+                app.logger.error(f"Could not connect to cashier-service to update grace period: {e}")
+                flash("Could not update grace period: cashier service unavailable.", "error")
+    except ValueError:
+        flash("Invalid number format for grace period.", "error")
+    except Exception as e:
+        app.logger.error(f"Error updating grace period: {e}", exc_info=True)
+        flash("An unexpected error occurred while updating grace period.", "error")
     return redirect(url_for('admin_settings'))
 
 @app.route('/admin/update_base_rates', methods=['POST'])

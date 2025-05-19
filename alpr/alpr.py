@@ -82,7 +82,6 @@ class ALPR(MongoSaver):
                 if avg_confidence >= self.ocr.confianza_avg and self.ocr.none_low(char_probs, thresh=self.ocr.none_low_thresh):
                     plate_number = "".join(plate_chars).replace("_", "")
                     
-                    # Debounce Logic (per plate, per camera)
                     if self.plate_last_seen_log_collection is not None and self.plate_cooldown_seconds > 0:
                         cooldown_delta = timedelta(seconds=self.plate_cooldown_seconds)
                         last_seen_record = self.plate_last_seen_log_collection.find_one({
@@ -90,8 +89,8 @@ class ALPR(MongoSaver):
                             "camera_id": camera_id
                         })
                         if last_seen_record and (current_frame_timestamp - last_seen_record['timestamp'] < cooldown_delta):
-                            logger.info(f"Plate {plate_number} at {camera_id} re-detected within cooldown period ({current_frame_timestamp - last_seen_record['timestamp'] < cooldown_delta}). Ignoring.")
-                            continue # Skip further processing for this debounced plate
+                            logger.info(f"Plate {plate_number} at {camera_id} re-detected within cooldown period. Ignoring.")
+                            continue 
 
                     logger.info(f"Plate detected (passed cooldown): {plate_number} with confidence {avg_confidence:.2f} from {camera_id}")
                     
@@ -108,30 +107,48 @@ class ALPR(MongoSaver):
                         logger.error(f"Failed to save image {image_path_in_volume}: {e}")
                         db_image_path = None 
 
-                    # Parking Logic
                     parking_logic_processed = False
                     if self.parking_sessions_collection is not None:
                         try:
                             active_session = self.parking_sessions_collection.find_one({
-                                "plate_number": plate_number, "status": "inside"
+                                "plate_number": plate_number, "status": "inside" # Query by old status for now
                             })
                             if active_session: 
                                 if camera_role == "entry":
                                     logger.warning(f"Plate {plate_number} at ENTRY camera {camera_id} but already 'inside'. Updating last_seen.")
-                                    uresult = self.parking_sessions_collection.update_one({"_id": active_session["_id"]}, {"$set": {"last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}})
+                                    uresult = self.parking_sessions_collection.update_one(
+                                        {"_id": active_session["_id"]}, 
+                                        {"$set": {"last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}}
+                                    )
                                     logger.info(f"Last_seen update for {plate_number} ack: {uresult.acknowledged}")
-                                elif camera_role == "exit" or camera_role == "common":
+                                elif camera_role == "exit" or camera_role == "common": # Common can also be an exit
                                     logger.info(f"Plate {plate_number} EXITING at {camera_role} camera {camera_id}.")
-                                    uresult = self.parking_sessions_collection.update_one({"_id": active_session["_id"]}, {"$set": {"exit_timestamp": current_frame_timestamp, "exit_image_path": db_image_path, "exit_camera_id": camera_id, "status": "exited", "last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}})
+                                    update_fields = {
+                                        "exit_timestamp": current_frame_timestamp, # This is effectively exit_detected_timestamp
+                                        "exit_image_path": db_image_path, 
+                                        "exit_camera_id": camera_id, 
+                                        # "status": "exited", # Status will be updated by cashier or timeout logic
+                                        "session_state": "AWAITING_PAYMENT_RESOLUTION", # New state
+                                        "last_seen_timestamp": current_frame_timestamp, 
+                                        "last_seen_camera_id": camera_id
+                                    }
+                                    uresult = self.parking_sessions_collection.update_one(
+                                        {"_id": active_session["_id"]}, 
+                                        {"$set": update_fields}
+                                    )
                                     logger.info(f"Exit update for {plate_number} ack: {uresult.acknowledged}")
                                 elif camera_role == "monitoring":
-                                    uresult = self.parking_sessions_collection.update_one({"_id": active_session["_id"]}, {"$set": {"last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}})
+                                    uresult = self.parking_sessions_collection.update_one(
+                                        {"_id": active_session["_id"]}, 
+                                        {"$set": {"last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}}
+                                    )
                                     logger.info(f"Monitoring update for {plate_number} ack: {uresult.acknowledged}")
                                 parking_logic_processed = True
-                            else: 
+                            else: # No active session, potential new entry
                                 if camera_role == "exit":
-                                    logger.warning(f"Plate {plate_number} at EXIT camera {camera_id} but no active session.")
-                                else: 
+                                    logger.warning(f"Plate {plate_number} at EXIT camera {camera_id} but no active session found.")
+                                    # Optionally create a session with only exit data if policy dictates
+                                else: # Entry or Common camera, create new session
                                     logger.info(f"Plate {plate_number} ENTERING at {camera_role} camera {camera_id}.")
                                     new_session = {
                                         "plate_number": plate_number, 
@@ -141,37 +158,32 @@ class ALPR(MongoSaver):
                                         "exit_timestamp": None, 
                                         "exit_image_path": None, 
                                         "exit_camera_id": None, 
-                                        "status": "inside", 
+                                        "status": "inside", # Keep for compatibility
+                                        "session_state": "VEHICLE_ENTERED", # New state
                                         "last_seen_timestamp": current_frame_timestamp, 
                                         "last_seen_camera_id": camera_id,
-                                        "vehicle_type": None, # Added: Default to None, to be set via UI
-                                        "price_per_hour": None, # Placeholder for future rate association
-                                        "calculated_cost": None, # Placeholder
-                                        "payment_status": "unpaid" # Default payment status
+                                        "vehicle_type": None,
+                                        "payment_status": "unpaid"
                                     }
                                     iresult = self.parking_sessions_collection.insert_one(new_session)
-                                    logger.info(f"Parking session for {plate_number} created with vehicle_type=None, payment_status=unpaid. Ack: {iresult.acknowledged}")
+                                    logger.info(f"Parking session for {plate_number} created. Ack: {iresult.acknowledged}")
                                     parking_logic_processed = True
                         except Exception as e_parking:
                             logger.error(f"Error during parking logic for {plate_number}: {e_parking}", exc_info=True)
                     else: 
                         logger.debug("Parking session collection N/A. Skipping parking logic.")
 
-                    # Update plate_last_seen_log if parking logic or raw log was actioned
                     if self.plate_last_seen_log_collection is not None and (parking_logic_processed or (self.log_raw_detections and db_image_path)):
                         try:
-                            lsl_result = self.plate_last_seen_log_collection.update_one(
+                            self.plate_last_seen_log_collection.update_one(
                                 {"plate_number": plate_number, "camera_id": camera_id},
                                 {"$set": {"timestamp": current_frame_timestamp}},
                                 upsert=True
                             )
-                            logger.debug(f"Updated plate_last_seen_log for {plate_number} at {camera_id}. Ack: {lsl_result.acknowledged}")
                         except Exception as e_lsl:
                              logger.error(f"Error updating plate_last_seen_log for {plate_number}: {e_lsl}", exc_info=True)
 
-
-                    if db_image_path: 
-                        logger.info(f"Attempting to log raw detection for plate {plate_number} from {camera_id}. MongoSaver's log_raw_detections: {self.log_raw_detections}")
+                    if db_image_path and self.log_raw_detections: 
                         super().add_detection_record(
                             camera_id=camera_id, plate_number=plate_number,
                             confidence=float(avg_confidence * 100), image_path=db_image_path

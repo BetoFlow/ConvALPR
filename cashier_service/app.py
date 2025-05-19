@@ -201,6 +201,57 @@ def set_plate_cooldown():
         app.logger.error("Failed to update plate cooldown in DB.")
         return jsonify({"error": "Failed to update plate cooldown"}), 500
 
+# --- Grace Period Management ---
+GRACE_PERIOD_CONFIG_DOC_ID = "grace_period_config"
+DEFAULT_GRACE_PERIOD_SECONDS = 300 # Default 5 minutes
+
+@app.route('/api/settings/grace-period', methods=['GET'])
+def get_grace_period():
+    if inflation_factors_collection is None: # Using this collection for general settings
+        return jsonify({"error": "Database not connected"}), 500
+    
+    grace_doc = inflation_factors_collection.find_one({"_id": GRACE_PERIOD_CONFIG_DOC_ID})
+    if grace_doc and "grace_period_seconds" in grace_doc:
+        return jsonify({
+            "grace_period_seconds": grace_doc.get("grace_period_seconds"), 
+            "last_updated": grace_doc.get("last_updated")
+        }), 200
+    else:
+        return jsonify({
+            "grace_period_seconds": DEFAULT_GRACE_PERIOD_SECONDS, 
+            "last_updated": None, 
+            "message": "Grace period not set, returning default."
+        }), 200
+
+@app.route('/api/settings/grace-period', methods=['POST'])
+def set_grace_period():
+    if inflation_factors_collection is None:
+        return jsonify({"error": "Database not connected"}), 500
+    
+    data = request.get_json()
+    if not data or 'grace_period_seconds' not in data:
+        return jsonify({"error": "Missing 'grace_period_seconds' in request body"}), 400
+    
+    try:
+        new_grace_period = int(data['grace_period_seconds'])
+        if new_grace_period < 0:
+            return jsonify({"error": "Grace period must be a non-negative integer"}), 400
+    except ValueError:
+        return jsonify({"error": "Grace period must be a valid integer"}), 400
+    
+    update_result = inflation_factors_collection.update_one(
+        {"_id": GRACE_PERIOD_CONFIG_DOC_ID},
+        {"$set": {"grace_period_seconds": new_grace_period, "last_updated": datetime.utcnow()}},
+        upsert=True
+    )
+    
+    if update_result.acknowledged:
+        app.logger.info(f"Grace period updated to: {new_grace_period} seconds")
+        return jsonify({"message": "Grace period updated successfully", "new_grace_period_seconds": new_grace_period}), 200
+    else:
+        app.logger.error("Failed to update grace period in DB.")
+        return jsonify({"error": "Failed to update grace period"}), 500
+
 # --- Base Rate Management ---
 # Structure per vehicle type in 'rate_configs' collection:
 # { "_id": "CAR_SUV", "vehicle_type_label": "Car/SUV", 
@@ -509,35 +560,80 @@ def record_payment_api():
         app.logger.error(f"Error parsing session_id or payment_timestamp_iso: {e}")
         return jsonify({"error": "Invalid session_id or payment_timestamp_iso format"}), 400
 
+    # Determine the next state based on whether an exit_timestamp exists (vehicle physically exited or not)
+    # This logic might need refinement based on exact operational flow.
+    # For now, if payment is made, we assume it's ready to be closed or has already exited.
+    
+    session_to_update = parking_sessions_collection.find_one({'_id': session_oid})
+    if not session_to_update:
+        # This should have been caught by the matched_count check later, but good to be safe
+        app.logger.error(f"Session {data['session_id']} disappeared before payment update.")
+        return jsonify({"error": "Session not found during payment update"}), 404
+
+    final_session_state = "SESSION_CLOSED" # Terminal state
+    final_status_field = "exited" # Assume exit after payment or if already exited
+    final_payment_status = "completed_paid"
+
     update_fields = {
-        'payment_status': 'paid_pending_exit', # Or 'completed_paid' if exit already happened?
+        'payment_status': final_payment_status,
+        'session_state': final_session_state, 
+        'status': final_status_field, # Update the old status field as well
         'calculated_cost': float(data['calculated_total_charge']),
         'amount_received': float(data['amount_received']),
         'change_given': float(data['change_given']),
         'payment_timestamp': payment_ts,
-        'payment_processed_by_user_id': data['cashier_user_id'], # Storing user ID
+        'payment_processed_by_user_id': data['cashier_user_id'], 
         'payment_modality': data['modality_applied']
     }
     if 'inflation_factor_applied' in data:
         update_fields['payment_inflation_factor'] = float(data['inflation_factor_applied'])
     if 'duration_minutes' in data:
         update_fields['payment_duration_minutes'] = float(data['duration_minutes'])
-
+    
+    # If the session doesn't have an exit_timestamp yet (e.g. paid at cashier before reaching exit),
+    # and the new state implies exit, we might want to set exit_timestamp here.
+    # However, the document implies VEHICLE_EXIT_DETECTED happens first.
+    # For now, we assume exit_timestamp is set by ANPR or manually if vehicle has exited.
+    # If payment happens for a VEHICLE_ENTERED state, it might transition to a "PAID_AWAITING_EXIT" state.
+    # Let's adjust based on current session_state from DB.
+    
+    current_session_state = session_to_update.get('session_state')
+    if current_session_state == "VEHICLE_ENTERED":
+        # Paid before any exit detection
+        update_fields['session_state'] = "PAID_AWAITING_EXIT" # Custom state for this scenario
+        update_fields['status'] = "inside" # Remains inside
+        update_fields['payment_status'] = "paid_pending_exit" # Use existing payment status
+    # If AWAITING_PAYMENT_RESOLUTION, then the final_session_state, final_status_field, final_payment_status are good.
 
     try:
+        # Only allow payment if session is 'unpaid' or in a state that expects payment
+        # (e.g. VEHICLE_ENTERED, AWAITING_PAYMENT_RESOLUTION)
+        query_filter = {
+            '_id': session_oid,
+            '$or': [
+                {'payment_status': 'unpaid'},
+                {'session_state': 'AWAITING_PAYMENT_RESOLUTION'} 
+            ]
+        }
+        # If session_state is not yet widely adopted, rely more on payment_status for the query
+        if not current_session_state : # If old session without session_state
+             query_filter = {'_id': session_oid, 'payment_status': 'unpaid'}
+
+
         result = parking_sessions_collection.update_one(
-            {'_id': session_oid, 'payment_status': 'unpaid'}, # Ensure we only update unpaid sessions
+            query_filter,
             {'$set': update_fields}
         )
+
         if result.matched_count == 0:
-             # Could be already paid, or session_id wrong
-            existing_session = parking_sessions_collection.find_one({'_id': session_oid})
-            if existing_session and existing_session.get('payment_status') != 'unpaid':
-                 app.logger.warning(f"Attempt to record payment for already processed session: {data['session_id']}")
-                 return jsonify({"error": "Session already processed or payment status is not 'unpaid'"}), 409 # Conflict
+            # Check why it didn't match
+            existing_session_for_error = parking_sessions_collection.find_one({'_id': session_oid})
+            if existing_session_for_error:
+                app.logger.warning(f"Payment recording: No match for session {data['session_id']}. Current payment_status: {existing_session_for_error.get('payment_status')}, session_state: {existing_session_for_error.get('session_state')}")
+                return jsonify({"error": "Session not eligible for payment (already paid or invalid state)"}), 409 # Conflict
             else:
-                 app.logger.warning(f"Session not found for payment recording or status not 'unpaid': {data['session_id']}")
-                 return jsonify({"error": "Session not found or not eligible for payment"}), 404
+                 app.logger.warning(f"Payment recording: Session {data['session_id']} not found.")
+                 return jsonify({"error": "Session not found"}), 404
 
         if result.modified_count == 1:
             app.logger.info(f"Payment recorded successfully for session: {data['session_id']}")

@@ -67,6 +67,11 @@
                 <input type="text" value="{{ session.payment_status | default('unpaid') | capitalize }}" readonly>
             </div>
 
+            <div class="form-group">
+                <label>Current Session State:</label>
+                <input type="text" value="{{ session.session_state | default(session.status) | capitalize | replace('_', ' ') }}" readonly>
+            </div>
+
             {% if session.payment_status == 'paid_pending_exit' or session.payment_status == 'completed_paid' %}
             <div class="form-group">
                 <label>Calculated Cost (ARS):</label>
