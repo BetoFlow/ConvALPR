@@ -4,17 +4,18 @@
 
 **ConvALPR** es un sistema avanzado de Reconocimiento Automático de Patentes Vehiculares (ANPR) que utiliza **Redes Neuronales Convolucionales (CNNs)**. A diferencia de métodos tradicionales, este enfoque permite reconocer patentes incluso con obstrucciones, diferencias de brillo, o caracteres borrosos.
 
-Originalmente enfocado en los procesos de **localización** (detector de objetos) y **reconocimiento** (OCR) de patentes, ConvALPR ha evolucionado a un **sistema integral multi-servicio** para la gestión de estacionamientos. Este sistema incluye un portal web para visualización y administración, un módulo de caja para la gestión financiera, y se despliega fácilmente mediante **Docker Compose**.
+Originalmente enfocado en los procesos de **localización** (detector de objetos) y **reconocimiento** (OCR) de patentes, ConvALPR ha evolucionado a un **sistema integral multi-servicio** para la gestión de estacionamientos. Este sistema incluye un portal web para visualización y administración, un módulo de caja para la gestión financiera, y una **gestión de ciclo de vida de sesiones centralizada mediante una máquina de estados (`ParkingSessionStateMachine`) en un módulo `common` compartido**. Se despliega fácilmente mediante **Docker Compose**.
 
 ![Proceso ALPR](assets/proceso.png)
 
 ## Arquitectura del Sistema
 
-La aplicación utiliza una arquitectura de microservicios orquestada por Docker Compose. Consiste en los siguientes servicios principales:
+La aplicación utiliza una arquitectura de microservicios orquestada por Docker Compose. Consiste en los siguientes servicios principales y un módulo compartido:
 
-*   **`anpr-service`**: Motor central para el procesamiento de video, detección y reconocimiento de patentes (TensorFlow), lógica inicial de sesiones de estacionamiento, y guardado de datos en MongoDB.
-*   **`cashier-service`**: Gestiona configuraciones financieras (tarifas, inflación, período de gracia), calcula cargos de estacionamiento, y registra pagos. También almacena configuraciones operativas (zona horaria, cooldown de detección).
-*   **`web-portal`**: Aplicación web Flask que provee la interfaz de usuario para visualización de sesiones y detecciones, carga de videos, gestión de cámaras, administración de usuarios y configuración del sistema.
+*   **`common` module**: Un módulo Python compartido que contiene la `ParkingSessionStateMachine`. Esta máquina de estados es la autoridad central para los estados y transiciones de las sesiones de estacionamiento. Es utilizada por los servicios `anpr-service`, `cashier-service` y `web-portal`.
+*   **`anpr-service`**: Motor central para el procesamiento de video, detección y reconocimiento de patentes (TensorFlow). Detecta entradas/salidas de vehículos y **desencadena eventos en la `ParkingSessionStateMachine`**.
+*   **`cashier-service`**: Gestiona configuraciones financieras (tarifas, inflación, período de gracia), calcula cargos de estacionamiento y registra pagos **desencadenando eventos de pago en la `ParkingSessionStateMachine`**.
+*   **`web-portal`**: Aplicación web Flask que provee la interfaz de usuario. Para los timeouts de sesión, **desencadena eventos de timeout en la `ParkingSessionStateMachine`**.
 *   **`mongodb`**: Base de datos NoSQL central para todos los datos de la aplicación.
 *   **`mongo-express`**: Interfaz web administrativa para MongoDB.
 
@@ -25,7 +26,7 @@ La aplicación utiliza una arquitectura de microservicios orquestada por Docker 
 *   **Modelos Avanzados**: Utiliza modelos basados en TensorFlow (YOLOv4-tiny para detección, CNNs personalizadas para OCR).
 *   **Gestión Integral de Estacionamiento**:
     *   Seguimiento de entrada/salida de vehículos.
-    *   Ciclo de vida detallado de sesiones de estacionamiento (`VEHICLE_ENTERED`, `AWAITING_PAYMENT_RESOLUTION`, `PAID_AWAITING_EXIT`, `SESSION_UNPAID_TIMEOUT`, `SESSION_CLOSED`).
+    *   Ciclo de vida detallado de sesiones de estacionamiento (`INIT`, `VEHICLE_ENTERED`, `AWAITING_PAYMENT_RESOLUTION`, `PAID_AWAITING_EXIT`, `SESSION_UNPAID_TIMEOUT`, `SESSION_CLOSED`), **gestionado centralmente por `ParkingSessionStateMachine`**.
     *   Tipo de vehículo por defecto: `CAR_SUV` para nuevas sesiones.
 *   **Portal Web Interactivo (`web-portal`)**:
     *   Visualización de sesiones de estacionamiento y detecciones crudas (con timestamps localizados).
@@ -39,7 +40,7 @@ La aplicación utiliza una arquitectura de microservicios orquestada por Docker 
     *   Configuración de Factor de Ajuste por Inflación.
     *   Configuración de Tarifas Base (por tipo de vehículo y modalidad: horaria, diaria, nocturna, abonos).
     *   Cálculo de cargos de estacionamiento.
-    *   Procesamiento de pagos (simulado o integrado).
+    *   Procesamiento de pagos (interactuando con la FSM).
 *   **Configuraciones Operativas (Admin UI)**:
     *   Zona Horaria Operacional.
     *   Cooldown para Detección de Patentes (requiere reinicio de `anpr-service`).
@@ -65,7 +66,7 @@ La aplicación utiliza una arquitectura de microservicios orquestada por Docker 
     ```bash
     docker compose up --build -d
     ```
-    Este comando construirá las imágenes de los servicios (si es la primera vez o si hay cambios en los Dockerfiles) y luego iniciará todos los contenedores en segundo plano (`-d`).
+    Este comando construirá las imágenes de los servicios (incluyendo el módulo `common` compartido y las dependencias como `transitions`) y luego iniciará todos los contenedores en segundo plano (`-d`).
 
 ### Acceso a los Servicios
 
@@ -79,22 +80,17 @@ La aplicación utiliza una arquitectura de microservicios orquestada por Docker 
 
 La configuración principal del sistema se realiza a través de:
 
-1.  **Variables de Entorno**: Definidas en el archivo `docker-compose.yml` para cada servicio. Estas controlan aspectos como la URI de MongoDB, claves secretas, y parámetros de los modelos de ANPR.
+1.  **Variables de Entorno**: Definidas en el archivo `docker-compose.yml` para cada servicio.
 2.  **Interfaz de Configuración de Administrador (en el Portal Web)**:
     *   Una vez logueado como administrador en `http://localhost:5000`, navega a "Admin Settings".
-    *   Desde aquí puedes configurar:
-        *   Factor de Ajuste por Inflación.
-        *   Tarifas Base para diferentes tipos de vehículos y modalidades.
-        *   Zona Horaria Operacional del sistema.
-        *   Tiempo de Cooldown para la detección de patentes (requiere reinicio del `anpr-service`).
-        *   Período de Gracia para pagos.
-3.  **`config.yaml`**: Este archivo (ubicado en la raíz) aún puede ser utilizado por el `anpr-service` para parámetros específicos de los modelos de detección y OCR que no se configuran por variables de entorno.
+    *   Desde aquí puedes configurar los parámetros financieros y operativos.
+3.  **Dockerfiles**: Ahora incluyen la copia del módulo `common` y la configuración de `PYTHONPATH` para asegurar que los módulos compartidos sean accesibles.
+4.  **`config.yaml`**: Puede seguir siendo utilizado por el `anpr-service` para parámetros específicos de modelos.
 
 ---
 
 ## Componentes Individuales de ALPR (Para Desarrollo y Pruebas)
-
-Las siguientes secciones describen cómo probar los componentes de localización y OCR de forma aislada, utilizando scripts de Python. Esto es útil para desarrollo o pruebas específicas de los modelos de ALPR, pero **no es la forma de ejecutar la aplicación completa**.
+(Esta sección permanece sin cambios, ya que se refiere a pruebas aisladas de los componentes ALPR y no a la aplicación multi-servicio).
 
 ### Instalar Dependencias (para scripts individuales)
 
@@ -144,7 +140,7 @@ Modelos personalizados en TensorFlow Keras, ubicados en [`alpr/models/ocr`](alpr
 *   *Este trabajo forma parte de un proyecto integrador para la Universidad.*
 
 ## TODO (Revisado)
-
+(Esta sección permanece sin cambios)
 *   [ ] **Módulo de Caja**:
     *   [ ] Implementar lógica de cálculo para modalidades `NIGHTLY` y `LONG-TERM` en `cashier-service`.
     *   [ ] Implementar gestión de `ABONO_MENSUAL` (lookup de abonados, cargo cero).
