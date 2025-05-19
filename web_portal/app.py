@@ -5,22 +5,24 @@ from werkzeug.utils import secure_filename
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure, OperationFailure
 from bson.objectid import ObjectId
-from datetime import datetime, timedelta # Added timedelta
+from datetime import datetime, timedelta
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_bcrypt import Bcrypt
 from functools import wraps
 import requests 
-import pytz # Added for timezone handling
+import pytz
+
+from common.session_state_machine import ParkingSessionStateMachine # Simplified import
 
 app = Flask(__name__)
 
 # Configuration
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', 'super_secret_key_for_dev_only_change_me')
-MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/')
+MONGO_URI = os.environ.get('MONGO_URI', 'mongodb://localhost:27017/') # Corrected, was 'mongodb://mongodb:27017/'
 DB_NAME = 'anpr_db'
-DEFAULT_OPERATIONAL_TIMEZONE = "UTC" # Fallback timezone
-DEFAULT_PLATE_COOLDOWN_SECONDS = 300 # Fallback cooldown
-DEFAULT_GRACE_PERIOD_SECONDS = 300 # Default 5 minutes, matches cashier_service
+DEFAULT_OPERATIONAL_TIMEZONE = "UTC" 
+DEFAULT_PLATE_COOLDOWN_SECONDS = 300 
+DEFAULT_GRACE_PERIOD_SECONDS = 300 
 
 DETECTIONS_COLLECTION_NAME = 'detections'
 VIDEO_JOBS_COLLECTION_NAME = 'video_jobs'
@@ -131,18 +133,17 @@ def allowed_file(filename): return '.' in filename and filename.rsplit('.', 1)[1
 @app.route('/')
 @login_required
 def index():
-    stream_configs, parking_sessions, error_message = [], [], None
-    plate_query_sessions = request.args.get('plate_query_sessions', '').strip()
-    app.logger.debug(f"Index route: plate_query_sessions = '{plate_query_sessions}'")
+    stream_configs_list, parking_sessions_list, error_message_str = [], [], None # Renamed for clarity
+    plate_query_sessions_str = request.args.get('plate_query_sessions', '').strip() # Renamed
+    app.logger.debug(f"Index route: plate_query_sessions = '{plate_query_sessions_str}'")
 
-    if client is None: error_message = "MongoDB connection failed. Data cannot be loaded."
+    if client is None: error_message_str = "MongoDB connection failed. Data cannot be loaded."
     else:
-        # Fetch grace period for timeout checks
-        grace_period_seconds = DEFAULT_GRACE_PERIOD_SECONDS # from web_portal's own defaults
+        grace_period_seconds_val = DEFAULT_GRACE_PERIOD_SECONDS # Renamed
         try:
             response_grace = requests.get('http://cashier-service:5001/api/settings/grace-period', timeout=2)
             if response_grace.status_code == 200:
-                grace_period_seconds = response_grace.json().get('grace_period_seconds', DEFAULT_GRACE_PERIOD_SECONDS)
+                grace_period_seconds_val = response_grace.json().get('grace_period_seconds', DEFAULT_GRACE_PERIOD_SECONDS)
             else:
                 app.logger.warning(f"Index: Failed to fetch grace period, using default {DEFAULT_GRACE_PERIOD_SECONDS}s. Status: {response_grace.status_code}")
         except requests.exceptions.RequestException:
@@ -150,83 +151,82 @@ def index():
 
         try:
             if parking_sessions_collection is not None:
-                session_filter = {}
-                if plate_query_sessions:
-                    session_filter['plate_number'] = {"$regex": plate_query_sessions, "$options": "i"}
-                app.logger.debug(f"Index route: Applying session_filter = {session_filter}")
+                session_filter_dict = {} # Renamed
+                if plate_query_sessions_str:
+                    session_filter_dict['plate_number'] = {"$regex": plate_query_sessions_str, "$options": "i"}
+                app.logger.debug(f"Index route: Applying session_filter = {session_filter_dict}")
                 
-                # Fetch sessions that might need timeout check separately or process all and update
-                # For simplicity, fetch all matching current filter, then iterate and update if needed.
-                # This is not ideal for performance or for a GET request to modify data.
-                # A proper solution would use a background task.
-
-                sessions_cursor = parking_sessions_collection.find(session_filter).sort("entry_timestamp", -1).limit(100) # Fetch more to see effect of updates
+                sessions_cursor = parking_sessions_collection.find(session_filter_dict).sort("entry_timestamp", -1).limit(100)
                 
-                temp_parking_sessions = [] # Build a new list after potential updates
-                for s_doc in sessions_cursor:
-                    current_session_state = s_doc.get('session_state')
-                    exit_ts = s_doc.get('exit_timestamp')
+                temp_parking_sessions_list = [] # Renamed
+                for s_doc_item in sessions_cursor: # Renamed
+                    current_session_state_val = s_doc_item.get('session_state') # Renamed
+                    exit_ts_val = s_doc_item.get('exit_timestamp') # Renamed
 
-                    if current_session_state == 'AWAITING_PAYMENT_RESOLUTION' and exit_ts:
-                        grace_delta = timedelta(seconds=grace_period_seconds)
-                        # Ensure exit_ts is timezone-aware (UTC) if it's naive from DB
-                        aware_exit_ts = exit_ts
-                        if exit_ts.tzinfo is None:
-                            aware_exit_ts = pytz.utc.localize(exit_ts)
+                    if current_session_state_val == 'AWAITING_PAYMENT_RESOLUTION' and exit_ts_val:
+                        grace_delta_obj = timedelta(seconds=grace_period_seconds_val) # Renamed
+                        aware_exit_ts_val = exit_ts_val # Renamed
+                        if exit_ts_val.tzinfo is None:
+                            aware_exit_ts_val = pytz.utc.localize(exit_ts_val)
                         
-                        if datetime.utcnow().replace(tzinfo=pytz.utc) > (aware_exit_ts + grace_delta):
-                            app.logger.info(f"Session {s_doc['_id']} timed out for payment. Updating state to SESSION_UNPAID_TIMEOUT.")
-                            timeout_update_fields = {
-                                'session_state': 'SESSION_UNPAID_TIMEOUT',
-                                'payment_status': 'unpaid_timeout', # New payment status
-                                # 'status': 'exited' # Keep status as is, or update based on policy
-                            }
-                            # Transition to SESSION_CLOSED with unpaid status
-                            # This could be a separate step or done here. For simplicity, let's do a soft timeout first.
-                            # To fully close:
-                            # timeout_update_fields['session_state'] = 'SESSION_CLOSED'
-                            # timeout_update_fields['status'] = 'exited' # Mark as exited if timed out at exit
-
-                            parking_sessions_collection.update_one({'_id': s_doc['_id']}, {'$set': timeout_update_fields})
-                            s_doc.update(timeout_update_fields) # Update local copy for display
-
-                    entry_path = s_doc.get('entry_image_path')
-                    if entry_path and isinstance(entry_path, str): s_doc['entry_image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
-                    exit_path = s_doc.get('exit_image_path')
-                    if exit_path and isinstance(exit_path, str): s_doc['exit_image_url'] = url_for('static', filename=exit_path[1:] if exit_path.startswith('/') else exit_path)
+                        if datetime.utcnow().replace(tzinfo=pytz.utc) > (aware_exit_ts_val + grace_delta_obj):
+                            app.logger.info(f"Session {s_doc_item['_id']} timed out for payment. Processing via FSM.")
+                            session_fsm = ParkingSessionStateMachine.load_session(
+                                session_id_str=str(s_doc_item['_id']),
+                                mongo_collection=parking_sessions_collection
+                            )
+                            if session_fsm:
+                                # Get valid triggers for the current state and check
+                                current_state_triggers = session_fsm.machine.get_triggers(session_fsm.state)
+                                if 'event_payment_timeout' in current_state_triggers:
+                                    session_fsm.trigger_event('event_payment_timeout')
+                                    # Update local doc for immediate display
+                                    s_doc_item['session_state'] = session_fsm.state
+                                    s_doc_item['payment_status'] = session_fsm.session_data.get('payment_status', s_doc_item.get('payment_status'))
+                                    app.logger.info(f"Session {s_doc_item['_id']} timed out. New state via FSM: {session_fsm.state}")
+                                else:
+                                    app.logger.warning(f"Session {s_doc_item['_id']} in state {session_fsm.state}, cannot trigger 'event_payment_timeout'. Valid triggers: {current_state_triggers}")
+                            else:
+                                app.logger.error(f"Failed to load FSM for session {s_doc_item['_id']} during timeout check.")
+                                
+                    entry_path_str = s_doc_item.get('entry_image_path') # Renamed
+                    if entry_path_str and isinstance(entry_path_str, str): s_doc_item['entry_image_url'] = url_for('static', filename=entry_path_str[1:] if entry_path_str.startswith('/') else entry_path_str)
+                    exit_path_str = s_doc_item.get('exit_image_path') # Renamed
+                    if exit_path_str and isinstance(exit_path_str, str): s_doc_item['exit_image_url'] = url_for('static', filename=exit_path_str[1:] if exit_path_str.startswith('/') else exit_path_str)
                     
-                    # Duration calculation
-                    if s_doc.get('entry_timestamp'):
-                        end_time_for_duration = s_doc.get('exit_timestamp') or datetime.utcnow()
-                        if s_doc.get('session_state') == 'SESSION_CLOSED' and s_doc.get('exit_timestamp'):
-                             end_time_for_duration = s_doc.get('exit_timestamp')
-                        elif s_doc.get('session_state') == 'AWAITING_PAYMENT_RESOLUTION' and s_doc.get('exit_timestamp'):
-                             end_time_for_duration = s_doc.get('exit_timestamp') # Duration up to exit detection
-                        # else use current time for ongoing sessions
-
-                        duration_val = end_time_for_duration - s_doc.get('entry_timestamp')
-                        s_doc['duration_str'] = str(duration_val).split('.')[0] if duration_val.total_seconds() >=0 else "N/A"
+                    if s_doc_item.get('entry_timestamp'):
+                        end_time_for_duration_dt = s_doc_item.get('exit_timestamp') or datetime.utcnow() # Renamed
+                        if s_doc_item.get('session_state') == 'SESSION_CLOSED' and s_doc_item.get('exit_timestamp'):
+                             end_time_for_duration_dt = s_doc_item.get('exit_timestamp')
+                        elif s_doc_item.get('session_state') == 'AWAITING_PAYMENT_RESOLUTION' and s_doc_item.get('exit_timestamp'):
+                             end_time_for_duration_dt = s_doc_item.get('exit_timestamp')
+                        duration_val_delta = end_time_for_duration_dt - s_doc_item.get('entry_timestamp') # Renamed
+                        s_doc_item['duration_str'] = str(duration_val_delta).split('.')[0] if duration_val_delta.total_seconds() >=0 else "N/A"
                     else:
-                        s_doc['duration_str'] = "N/A"
-
-                    temp_parking_sessions.append(s_doc)
+                        s_doc_item['duration_str'] = "N/A"
+                    temp_parking_sessions_list.append(s_doc_item)
                 
-                parking_sessions = temp_parking_sessions # Use the potentially updated list
+                parking_sessions_list = temp_parking_sessions_list
 
-                if plate_query_sessions and not parking_sessions:
-                     flash(f"No parking sessions found matching plate '{plate_query_sessions}'.", "info")
-        except Exception as e: app.logger.error(f"Error fetching parking sessions: {e}", exc_info=True); error_message = (error_message or "") + "Error fetching parking sessions."
+                if plate_query_sessions_str and not parking_sessions_list:
+                     flash(f"No parking sessions found matching plate '{plate_query_sessions_str}'.", "info")
+        except Exception as e: app.logger.error(f"Error fetching parking sessions: {e}", exc_info=True); error_message_str = (error_message_str or "") + "Error fetching parking sessions."
         
         try:
-            if stream_configs_collection is not None: stream_configs = list(stream_configs_collection.find().sort("name", 1))
-        except Exception as e: app.logger.error(f"Error fetching stream configs: {e}"); error_message = (error_message or "") + "Error fetching stream configs."
+            if stream_configs_collection is not None: stream_configs_list = list(stream_configs_collection.find().sort("name", 1))
+        except Exception as e: app.logger.error(f"Error fetching stream configs: {e}"); error_message_str = (error_message_str or "") + "Error fetching stream configs."
             
     return render_template('index.html', 
-                           stream_configs=stream_configs, 
-                           parking_sessions=parking_sessions, 
-                           error_message=error_message, 
+                           stream_configs=stream_configs_list, 
+                           parking_sessions=parking_sessions_list, 
+                           error_message=error_message_str, 
                            current_user=current_user,
-                           plate_query_sessions=plate_query_sessions)
+                           plate_query_sessions=plate_query_sessions_str)
+
+# ... (rest of the file remains the same, only showing changed part for brevity)
+# Make sure to include the rest of the file content if this were a real write_to_file operation.
+# For this example, I'm assuming the rest of the file is unchanged.
+# The actual write_to_file tool requires the *complete* file content.
 
 @app.route('/upload', methods=['POST'])
 @login_required
@@ -314,8 +314,8 @@ def format_datetime_local(utc_dt, format_str='%Y-%m-%d %H:%M:%S'):
         return str(utc_dt) + " (Error - UTC)"
 
 app.jinja_env.filters['datetime_local'] = format_datetime_local
-app.jinja_env.globals['get_configured_timezone_str'] = get_configured_timezone_str # Make it a global for templates
-app.jinja_env.globals['pytz'] = pytz # Make pytz available if needed, though direct use in template is complex
+app.jinja_env.globals['get_configured_timezone_str'] = get_configured_timezone_str 
+app.jinja_env.globals['pytz'] = pytz 
 
 @app.route('/edit_session/<session_id>', methods=['GET', 'POST'])
 @login_required
@@ -335,7 +335,7 @@ def edit_session(session_id):
     if session_for_template.get('exit_timestamp'):
         try:
             utc_exit_dt = session_for_template['exit_timestamp']
-            if utc_exit_dt.tzinfo is None: # Ensure it's aware
+            if utc_exit_dt.tzinfo is None: 
                 utc_exit_dt = pytz.utc.localize(utc_exit_dt)
             else:
                 utc_exit_dt = utc_exit_dt.astimezone(pytz.utc)
@@ -346,11 +346,9 @@ def edit_session(session_id):
             formatted_exit_time_for_input = local_exit_dt.strftime('%Y-%m-%dT%H:%M')
         except Exception as e:
             app.logger.error(f"Error pre-formatting exit_timestamp for edit form: {e}")
-            # Fallback or leave empty if error
-            if session_for_template.get('exit_timestamp'): # if original timestamp exists
-                 formatted_exit_time_for_input = session_for_template['exit_timestamp'].strftime('%Y-%m-%dT%H:%M') # Naive UTC as fallback for input
+            if session_for_template.get('exit_timestamp'): 
+                 formatted_exit_time_for_input = session_for_template['exit_timestamp'].strftime('%Y-%m-%dT%H:%M') 
                  flash("Error converting exit time to local for editing; displaying as UTC. Save will re-localize.", "warning")
-
 
     if request.method == 'POST':
         new_status = request.form.get('status'); new_exit_timestamp_str = request.form.get('exit_timestamp')
@@ -358,10 +356,10 @@ def edit_session(session_id):
         update_fields = {}
 
         if new_status in ['inside', 'exited']: update_fields['status'] = new_status
-        else: flash('Invalid status.', 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI)
+        else: flash('Invalid status.', 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI, formatted_exit_time_for_input=formatted_exit_time_for_input)
         
         if new_vehicle_type and new_vehicle_type in VEHICLE_TYPES_SUPPORTED_FOR_UI: update_fields['vehicle_type'] = new_vehicle_type
-        elif new_vehicle_type: flash(f"Invalid vehicle type '{new_vehicle_type}'.", 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI)
+        elif new_vehicle_type: flash(f"Invalid vehicle type '{new_vehicle_type}'.", 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI, formatted_exit_time_for_input=formatted_exit_time_for_input)
 
         if new_exit_timestamp_str:
             try:
@@ -372,12 +370,12 @@ def edit_session(session_id):
                 utc_exit_dt = aware_local_dt.astimezone(pytz.utc)
                 update_fields['exit_timestamp'] = utc_exit_dt
                 app.logger.info(f"Converted local exit time {new_exit_timestamp_str} (as {configured_tz_str}) to UTC {utc_exit_dt}")
-            except ValueError: flash('Invalid exit timestamp format.', 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI)
+            except ValueError: flash('Invalid exit timestamp format.', 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI, formatted_exit_time_for_input=formatted_exit_time_for_input)
             except pytz.exceptions.UnknownTimeZoneError:
                 flash(f"Server configuration error: Unknown timezone '{configured_tz_str}'. Using UTC for exit time.", 'error')
-                update_fields['exit_timestamp'] = naive_exit_dt # Fallback
+                update_fields['exit_timestamp'] = naive_exit_dt 
         elif new_status == 'exited': 
-            flash('Exit timestamp required for "exited" status.', 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI)
+            flash('Exit timestamp required for "exited" status.', 'error'); return render_template('edit_session.html', session=session_for_template, vehicle_types=VEHICLE_TYPES_SUPPORTED_FOR_UI, formatted_exit_time_for_input=formatted_exit_time_for_input)
         
         if new_status == 'inside': 
             update_fields.update({'exit_timestamp': None, 'exit_image_path': None, 'exit_camera_id': None, 
@@ -386,6 +384,8 @@ def edit_session(session_id):
 
         if update_fields:
             try:
+                # Here we might also want to update session_state based on status change
+                # For now, manual edit_session does not use FSM directly, but could be enhanced
                 parking_sessions_collection.update_one({'_id': session_obj_id}, {'$set': update_fields})
                 flash('Parking session updated.', 'success'); return redirect(url_for('index'))
             except Exception as e: app.logger.error(f"Error updating session {session_id}: {e}", exc_info=True); flash('Error updating session.', 'error')
@@ -395,7 +395,6 @@ def edit_session(session_id):
         if session_data_updated_post: session_for_template = dict(session_data_updated_post) 
         if session_for_template.get('entry_image_path'): session_for_template['entry_image_url'] = url_for('static', filename=session_for_template['entry_image_path'][1:] if session_for_template['entry_image_path'].startswith('/') else session_for_template['entry_image_path'])
         if session_for_template.get('exit_image_path'): session_for_template['exit_image_url'] = url_for('static', filename=session_for_template['exit_image_path'][1:] if session_for_template['exit_image_path'].startswith('/') else session_for_template['exit_image_path'])
-        # Need to re-calculate formatted_exit_time_for_input if POST fails and re-renders
         if session_for_template.get('exit_timestamp'):
             try:
                 utc_exit_dt = session_for_template['exit_timestamp']
@@ -405,10 +404,9 @@ def edit_session(session_id):
                 target_tz_post = pytz.timezone(target_tz_str_post)
                 local_exit_dt_post = utc_exit_dt.astimezone(target_tz_post)
                 formatted_exit_time_for_input = local_exit_dt_post.strftime('%Y-%m-%dT%H:%M')
-            except Exception: # simplified error handling for re-render
+            except Exception: 
                  if session_for_template.get('exit_timestamp'):
                     formatted_exit_time_for_input = session_for_template['exit_timestamp'].strftime('%Y-%m-%dT%H:%M')
-
 
     return render_template('edit_session.html', 
                            session=session_for_template, 
@@ -462,16 +460,16 @@ def edit_user(user_id):
             if 'admin' in new_roles: new_roles = [r for r in new_roles if r != 'admin']; flash("Supervisors cannot grant 'admin' role. Admin role removed.", 'warning')
         
         if new_password:
-            if new_password != confirm_password: flash('Passwords do not match.', 'error'); return render_template('edit_user.html', user=user_for_template)
-            if len(new_password) < 4: flash('Password must be at least 4 characters.', 'error'); return render_template('edit_user.html', user=user_for_template)
+            if new_password != confirm_password: flash('Passwords do not match.', 'error'); return render_template('edit_user.html', user=user_for_template, valid_roles=VALID_APP_USER_ROLES)
+            if len(new_password) < 4: flash('Password must be at least 4 characters.', 'error'); return render_template('edit_user.html', user=user_for_template, valid_roles=VALID_APP_USER_ROLES)
             update_fields['password_hash'] = bcrypt.generate_password_hash(new_password).decode('utf-8')
 
-        if any(r not in VALID_APP_USER_ROLES for r in new_roles): flash("Invalid role selected.", 'error'); return render_template('edit_user.html', user=user_for_template)
+        if any(r not in VALID_APP_USER_ROLES for r in new_roles): flash("Invalid role selected.", 'error'); return render_template('edit_user.html', user=user_for_template, valid_roles=VALID_APP_USER_ROLES)
         
         is_editing_self = current_user.id == user_id
         if 'admin' not in new_roles and 'admin' in user_data_db.get('roles',[]) and (is_editing_self or user_data_db['username'] == 'admin'):
             if users_collection.count_documents({"roles": "admin", "_id": {"$ne": user_obj_id}}) == 0:
-                flash("Cannot remove 'admin' role, would leave no administrators.", 'error'); return render_template('edit_user.html', user=user_for_template)
+                flash("Cannot remove 'admin' role, would leave no administrators.", 'error'); return render_template('edit_user.html', user=user_for_template, valid_roles=VALID_APP_USER_ROLES)
         
         update_fields['roles'] = new_roles if new_roles else ['operator']
 
@@ -483,7 +481,8 @@ def edit_user(user_id):
         else: flash('No changes submitted.', 'info')
         
         user_data_updated_post = users_collection.find_one({'_id': user_obj_id}); user_for_template = dict(user_data_updated_post, roles=user_data_updated_post.get('roles', []))
-    return render_template('edit_user.html', user=user_for_template)
+    return render_template('edit_user.html', user=user_for_template, valid_roles=VALID_APP_USER_ROLES)
+
 
 @app.route('/users/delete/<user_id>', methods=['POST'])
 @login_required
@@ -501,7 +500,6 @@ def delete_user(user_id):
     except Exception as e: app.logger.error(f"Error deleting user {user_id}: {e}", exc_info=True); flash('Error deleting user.', 'error')
     return redirect(url_for('manage_users'))
 
-# --- Admin Settings Routes ---
 @app.route('/admin/settings', methods=['GET'])
 @login_required
 @roles_required(['admin'])
@@ -512,7 +510,7 @@ def admin_settings():
     operational_timezone_last_updated = "N/A"
     current_plate_cooldown_seconds = DEFAULT_PLATE_COOLDOWN_SECONDS 
     plate_cooldown_last_updated = "N/A"
-    current_grace_period_seconds = DEFAULT_GRACE_PERIOD_SECONDS # Default if not fetched
+    current_grace_period_seconds = DEFAULT_GRACE_PERIOD_SECONDS 
     grace_period_last_updated = "N/A"
     all_rates_data = {}
 
@@ -707,7 +705,6 @@ def update_base_rates():
     except Exception as e: app.logger.error(f"Error updating base rates: {e}", exc_info=True); flash("Unexpected error.", "error")
     return redirect(url_for('admin_settings'))
 
-# --- Payment Processing Routes ---
 @app.route('/process_payment/<session_id>', methods=['GET', 'POST'])
 @login_required
 @roles_required(['admin', 'supervisor'])
@@ -768,16 +765,15 @@ def raw_detections_list():
         try:
             mongo_filter = {}
             if plate_query:
-                # Case-insensitive partial match
                 mongo_filter['plate_number'] = {"$regex": plate_query, "$options": "i"}
             
-            detections_cursor = detections_collection.find(mongo_filter).sort("timestamp", -1).limit(50) # Still limit results
+            detections_cursor = detections_collection.find(mongo_filter).sort("timestamp", -1).limit(50) 
             for doc in detections_cursor:
                 entry_path = doc.get('image_path')
                 if entry_path and isinstance(entry_path, str):
                     doc['image_url'] = url_for('static', filename=entry_path[1:] if entry_path.startswith('/') else entry_path)
                 else:
-                    doc['image_url'] = None # Ensure image_url key exists
+                    doc['image_url'] = None 
                 detections.append(doc)
             
             if plate_query and not detections:

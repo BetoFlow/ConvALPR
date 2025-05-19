@@ -51,7 +51,9 @@ services:
       - anpr_network
 
   web-portal:
-    build: ./web_portal
+    build:
+      context: .
+      dockerfile: ./web_portal/Dockerfile
     container_name: web_portal
     ports:
       - "5000:5000"
@@ -69,8 +71,8 @@ services:
 
   cashier-service:
     build:
-      context: ./cashier_service
-      dockerfile: Dockerfile # Path relative to context
+      context: .
+      dockerfile: ./cashier_service/Dockerfile
     container_name: cashier_service
     ports:
       - "5001:5001" # Expose cashier service on host port 5001

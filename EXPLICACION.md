@@ -1,162 +1,92 @@
-# Explicación del Funcionamiento del Sistema ALPR (Automatic License Plate Recognition)
+# Explicación del Funcionamiento del Sistema Multi-Servicio ANPR
 
-Este documento describe el flujo de trabajo y los componentes principales del sistema de reconocimiento automático de patentes vehiculares implementado en este proyecto.
+Este documento describe el flujo de trabajo y los componentes principales del sistema de reconocimiento automático de patentes vehiculares (ANPR) y gestión de estacionamiento implementado en este proyecto.
 
 ## 1. Introducción
 
-El objetivo principal del sistema es detectar y reconocer los caracteres de las patentes de vehículos a partir de una fuente de video o una imagen estática. El proceso se divide en varias etapas: carga de configuración, lectura de la fuente, detección de la patente, reconocimiento de caracteres (OCR) y guardado de resultados.
+El sistema ConvALPR ha evolucionado de un conjunto de scripts de ALPR a una **aplicación integral multi-servicio** diseñada para la identificación de patentes en tiempo real, la gestión completa del ciclo de vida de las sesiones de estacionamiento (entrada, salida, estados de pago), y la administración financiera de tarifas. La aplicación se despliega como un conjunto de microservicios containerizados utilizando **Docker Compose**, facilitando su instalación y manejo.
 
-## 2. Flujo Principal (`reconocedor_automatico.py`)
+El núcleo del reconocimiento de patentes sigue utilizando **Redes Neuronales Convolucionales (CNNs)** para la localización y el Reconocimiento Óptico de Caracteres (OCR), permitiendo una alta precisión incluso en condiciones difíciles.
 
-El script `reconocedor_automatico.py` actúa como el orquestador principal del sistema.
+## 2. Arquitectura y Flujo General del Sistema
 
-*   **Inicio y Configuración:**
-    *   Al ejecutarse, utiliza `ArgumentParser` para procesar argumentos de línea de comandos, como la ruta al archivo de configuración (`--cfg`), si se debe ejecutar en modo demostración (`--demo`), si guardar el video resultante (`--guardar_video`) o si medir el rendimiento (`--benchmark`).
-    *   Carga la configuración desde un archivo YAML (por defecto `config.yaml`) usando `yaml.safe_load(stream)`. Esta configuración contiene parámetros cruciales como los modelos a usar, umbrales de confianza, fuente de video, etc.
-    *   Inicializa la clase principal `ALPR` pasándole la configuración cargada: `alpr = ALPR(cfg['modelo'], cfg['db'])`.
+El sistema se compone de varios servicios que interactúan entre sí:
 
-*   **Procesamiento de Video/Imagen:**
-    *   Abre la fuente de video o imagen especificada en la configuración (`cfg['video']['fuente']`) usando `cv2.VideoCapture(video_path)`.
-    *   Entra en un bucle (`while True`) para leer frames de la fuente (`cap.read()`). Si la fuente es una imagen, el bucle se ejecuta una sola vez (`is_img = cv2.haveImageReader(video_path)`).
-    *   Maneja posibles errores de lectura del stream (especialmente para cámaras IP) reintentando la conexión.
+*   **`anpr-service`**: Procesa los flujos de video (RTSP, archivos locales, videos cargados). Realiza la detección de patentes y el OCR. Inicia y actualiza sesiones de estacionamiento en la base de datos con estados iniciales (`VEHICLE_ENTERED`, `AWAITING_PAYMENT_RESOLUTION`) y asigna un tipo de vehículo por defecto (`CAR_SUV`). Guarda imágenes de las detecciones. Consulta la configuración de cooldown de detección (obtenida del `cashier-service`) al inicio.
+*   **`cashier-service`**: Servicio central para la lógica de negocio financiera y configuraciones operativas.
+    *   Gestiona y almacena configuraciones como: Factor de Inflación, Tarifas Base (por tipo de vehículo y modalidad), Zona Horaria Operacional, Cooldown de Detección de Patentes, y Período de Gracia para Pagos.
+    *   Provee APIs para calcular los cargos de estacionamiento y para registrar los pagos, actualizando el estado de la sesión (ej. a `PAID_AWAITING_EXIT` o `SESSION_CLOSED`).
+*   **`web-portal`**: Aplicación web Flask que sirve como interfaz de usuario.
+    *   Permite a los administradores configurar todos los parámetros mencionados arriba (tarifas, inflación, zona horaria, cooldown, período de gracia) a través de una interfaz gráfica.
+    *   Muestra listados de sesiones de estacionamiento y detecciones crudas (con timestamps ajustados a la zona horaria configurada e imágenes clickeables).
+    *   Permite la carga de videos para procesamiento, gestión de cámaras/streams, y administración de usuarios y roles.
+    *   Facilita el procesamiento de pagos interactuando con el `cashier-service`.
+    *   Realiza una verificación pasiva de timeouts para sesiones en `AWAITING_PAYMENT_RESOLUTION`.
+*   **`mongodb`**: Base de datos NoSQL donde se almacenan todos los datos persistentes: detecciones crudas, sesiones de estacionamiento, configuraciones de streams, trabajos de video, usuarios, configuraciones de tarifas y otros ajustes del sistema.
+*   **`mongo-express`**: Herramienta web para la administración directa de la base de datos MongoDB.
 
-*   **Modos de Operación:**
-    *   **Modo Demo (`if demo:`):**
-        *   Llama a `alpr.mostrar_predicts(frame)` que procesa el frame y devuelve una copia con las detecciones (rectángulos y texto) dibujadas.
-        *   Muestra el frame procesado en una ventana (`cv2.imshow("result", frame_w_pred_r)`).
-        *   Si está activado `--benchmark`, muestra el tiempo de procesamiento y los FPS en el frame.
-        *   Si está activado `--guardar_video`, escribe el frame procesado en un archivo `alpr-result.avi`.
-    *   **Modo Procesamiento (`else:`):**
-        *   Procesa frames a intervalos definidos por `cfg['video']['frecuencia_inferencia']` para optimizar el rendimiento (`if frame_id % intervalo_reconocimiento == 0:`).
-        *   Llama al método principal de reconocimiento: `patentes = alpr.predict(frame)`.
-        *   Si se detectan patentes (`if patentes:`):
-            *   Registra la hora y las patentes detectadas usando `logging`.
-            *   Evita registrar la misma patente consecutivamente comparando con `last_seen_patentes`.
-            *   Guarda cada patente detectada junto con la marca de tiempo en un archivo CSV (`alpr-results.csv`).
-            *   Guarda el frame donde se detectó la patente como una imagen PNG en la carpeta `./alpr-results/`.
-        *   Si está activado `--benchmark`, imprime el tiempo de procesamiento y los FPS en la consola.
+**Flujo Simplificado de una Sesión de Estacionamiento:**
+1.  Un vehículo entra. `anpr-service` lo detecta, crea una sesión con estado `VEHICLE_ENTERED` y `vehicle_type: CAR_SUV`.
+2.  El vehículo es detectado en una cámara de salida. `anpr-service` actualiza la sesión a `AWAITING_PAYMENT_RESOLUTION` y registra el `exit_timestamp`.
+3.  **Pago**:
+    *   Si se paga antes del timeout (a través del `web-portal` que llama al `cashier-service`): `cashier-service` actualiza la sesión a `SESSION_CLOSED` (estado final, pagado). Si se pagó antes de la detección de salida, el estado intermedio es `PAID_AWAITING_EXIT`.
+    *   **Timeout**: Si el período de gracia (configurable) transcurre después de `AWAITING_PAYMENT_RESOLUTION` sin pago, el `web-portal` (al mostrar los datos) puede actualizar la sesión a `SESSION_UNPAID_TIMEOUT`.
+4.  La sesión finaliza en `SESSION_CLOSED` (pagada o no pagada tras timeout).
 
-*   **Finalización:** Libera los recursos de video (`cap.release()`, `out.release()`) y cierra las ventanas de OpenCV (`cv2.destroyAllWindows()`).
+## 3. Componente Principal de ANPR (`alpr/alpr.py` dentro de `anpr-service`)
 
-## 3. Clase Principal ALPR (`alpr/alpr.py`)
-
-La clase `ALPR` encapsula la lógica central de detección y reconocimiento.
+La clase `ALPR` encapsula la lógica de detección y reconocimiento.
 
 *   **Inicialización (`__init__`):**
-    *   Hereda de `SqlSaver` para la funcionalidad de guardado en base de datos.
-    *   Carga el modelo de **detección** (`PlateDetector`) especificado en `cfg['modelo']['resolucion_detector']`. Valida que la resolución sea una de las soportadas (384, 512, 608).
-    *   Carga el modelo de **OCR** (`PlateOCR`) especificado por `cfg['modelo']['numero_modelo_ocr']` y establece los umbrales de confianza (`confianza_avg_ocr`, `confianza_low_ocr`).
-    *   Configura si se guardarán los resultados en la base de datos (`self.guardar_bd = cfg_db['guardar']`).
+    *   Recibe la URI de MongoDB, una instancia de conexión a la BD (`db_instance` para acceder a `parking_sessions` y `plate_last_seen_log`), y configuraciones como `log_raw_detections` y `plate_cooldown_seconds` (obtenido del `cashier-service` por `service_main.py`).
+    *   Carga los modelos de **detección** (`PlateDetector`) y **OCR** (`PlateOCR`) con sus respectivos parámetros de configuración (resolución, umbrales de confianza, número de modelo OCR).
+    *   Inicializa las colecciones de MongoDB necesarias: `parking_sessions_collection` y `plate_last_seen_log_collection`.
 
-*   **Método `predict`:**
-    *   Orquesta el proceso de reconocimiento estándar:
-        1.  Preprocesa el frame de entrada para el detector: `input_img = self.detector.preprocess(frame)`.
-        2.  Realiza la inferencia con el modelo YOLO para detectar patentes: `yolo_out = self.detector.predict(input_img)`.
-        3.  Aplica Non-Max Suppression (NMS) para filtrar detecciones redundantes: `bboxes = self.detector.procesar_salida_yolo(yolo_out)`.
-        4.  Obtiene las coordenadas de los rectángulos detectados: `iter_coords = self.detector.yield_coords(frame, bboxes)`.
-        5.  Realiza el OCR sobre cada rectángulo detectado: `patentes = self.ocr.predict(iter_coords, frame)`.
-        6.  Si `self.guardar_bd` es `True`, actualiza las patentes detectadas en memoria para su posterior guardado en la BD: `self.update_in_memory(patentes)`.
-    *   Devuelve una lista con las patentes reconocidas como texto.
-
-*   **Método `mostrar_predicts`:**
-    *   Utilizado en el modo demo. Sigue un flujo similar a `predict` pero, en lugar de solo devolver el texto, dibuja los rectángulos (`cv2.rectangle`) y el texto reconocido (`cv2.putText`) directamente sobre el frame para visualización.
-    *   Calcula y devuelve el tiempo total de procesamiento (`total_time`).
+*   **Método `process_frame`:**
+    *   Orquesta el proceso de ANPR para cada frame:
+        1.  Detección de patentes usando `PlateDetector`.
+        2.  OCR sobre cada patente detectada usando `PlateOCR`.
+        3.  **Lógica de Cooldown**: Verifica en `plate_last_seen_log_collection` si la patente+cámara fue vista recientemente para evitar detecciones duplicadas dentro del período de cooldown configurado.
+        4.  **Guardado de Imagen**: Guarda la imagen de la detección si se cumplen los criterios.
+        5.  **Lógica de Sesiones de Estacionamiento**:
+            *   Busca una sesión activa para la patente detectada.
+            *   Si no existe y la cámara es de entrada/común: crea una nueva sesión en `parking_sessions_collection` con `session_state: "VEHICLE_ENTERED"`, `vehicle_type: "CAR_SUV"`, y otros detalles de entrada.
+            *   Si existe una sesión activa y la cámara es de salida/común: actualiza la sesión existente, registrando el `exit_timestamp` y cambiando `session_state` a `"AWAITING_PAYMENT_RESOLUTION"`.
+            *   Actualiza `last_seen_timestamp` para sesiones activas.
+        6.  Actualiza el registro en `plate_last_seen_log_collection`.
+        7.  Si `log_raw_detections` es `True`, llama a `super().add_detection_record` para guardar la detección cruda (usando la lógica de `MongoSaver`).
+    *   Devuelve información sobre las patentes procesadas.
 
 ## 4. Detección de Patentes (`alpr/detector.py`)
 
-La clase `PlateDetector` se encarga de localizar las patentes en la imagen.
-
-*   **Inicialización (`__init__`):**
-    *   Carga el modelo YOLOv4-tiny pre-entrenado (en formato TensorFlow SavedModel) desde la ruta especificada (`weights_path`).
-    *   Establece los umbrales para NMS (`iou`) y la confianza mínima de detección (`score`).
-
-*   **Método `preprocess`:**
-    *   Redimensiona la imagen de entrada al tamaño requerido por el modelo YOLO (`self.input_size`).
-    *   Normaliza los valores de los píxeles al rango [0, 1].
-    *   Añade una dimensión de batch para que coincida con la entrada esperada por el modelo.
-
-*   **Método `predict`:**
-    *   Ejecuta la inferencia del modelo YOLO (`self.yolo_infer(input_img)`) sobre la imagen preprocesada.
-
-*   **Método `procesar_salida_yolo`:**
-    *   Aplica la función `tf.image.combined_non_max_suppression` a la salida cruda del modelo YOLO. Esto elimina rectángulos superpuestos que probablemente correspondan a la misma patente, conservando solo la detección más confiable.
-
-*   **Método `yield_coords`:**
-    *   Itera sobre los rectángulos resultantes del NMS.
-    *   Convierte las coordenadas normalizadas (proporcionadas por el modelo) a coordenadas de píxeles absolutas basadas en las dimensiones del frame original (`image_h`, `image_w`).
-    *   Devuelve (yield) las coordenadas `(x1, y1, x2, y2)` y la puntuación de confianza (`score`) para cada patente detectada.
+(La descripción de esta clase y su funcionamiento interno para localizar patentes mediante YOLOv4-tiny sigue siendo mayormente relevante como se describió originalmente.)
 
 ## 5. Reconocimiento de Caracteres (OCR) (`alpr/ocr.py`)
 
-La clase `PlateOCR` se especializa en identificar los caracteres dentro de los rectángulos detectados.
+(La descripción de esta clase y su funcionamiento interno para reconocer caracteres mediante CNNs personalizadas sigue siendo mayormente relevante como se describió originalmente.)
 
-*   **Inicialización (`__init__`):**
-    *   Carga el modelo CNN de OCR (TensorFlow SavedModel) especificado por `ocr_model_num` (1 a 4).
-    *   Define el alfabeto de caracteres posibles (`self.alphabet = string.digits + string.ascii_uppercase + '_'`).
-    *   Establece los umbrales de confianza promedio (`confianza_avg`) y mínima por caracter (`none_low_thresh`) para validar una predicción.
+## 6. Guardado de Resultados
 
-*   **Método `predict`:**
-    *   Recibe el iterador de coordenadas (`iter_coords`) del detector.
-    *   Para cada rectángulo (`yolo_prediction`):
-        *   Llama a `predict_ocr` para obtener el texto y las probabilidades de cada caracter.
-        *   Valida la predicción:
-            *   Calcula la confianza promedio (`avg = np.mean(probs)`).
-            *   Verifica que ningún caracter tenga una confianza individual por debajo del umbral `none_low_thresh` usando `self.none_low(probs, ...)`.
-            *   Si ambas condiciones se cumplen, limpia el texto (quita `_`) y lo añade a la lista `patentes`.
-    *   Devuelve la lista de patentes validadas.
+El sistema ahora utiliza **MongoDB** como base de datos central:
 
-*   **Método `predict_ocr`:**
-    *   Recorta la región de la patente del frame original usando las coordenadas `(x1, y1, x2, y2)`.
-    *   Llama a `__predict_from_array` para realizar la inferencia sobre la imagen recortada.
-    *   Llama a `__probs_to_plate` para convertir la salida del modelo en texto y probabilidades.
+*   **Sesiones de Estacionamiento (`parking_sessions` collection)**: Gestionadas directamente por la lógica en `ALPR.process_frame` (en `alpr/alpr.py`) y actualizadas por `cashier-service` durante el proceso de pago. Contienen el ciclo de vida completo de la estadía del vehículo.
+*   **Detecciones Crudas (`detections` collection)**: El guardado de estas detecciones (si está habilitado por `log_raw_detections`) es manejado por la clase `MongoSaver` (en `alpr/saver.py`), de la cual `ALPR` hereda. `MongoSaver` acumula detecciones en un batch y las inserta periódicamente.
+*   **Configuraciones y Otros Datos**: Colecciones como `users`, `stream_configs`, `rate_configs`, `inflation_factors` (que también almacena timezone, cooldown, grace period) son gestionadas por `web-portal` y/o `cashier-service`.
 
-*   **Método `__predict_from_array`:**
-    *   Preprocesa la imagen recortada de la patente:
-        *   Convierte a escala de grises (`cv2.cvtColor`).
-        *   Redimensiona a (140, 70) (`cv2.resize`).
-        *   Añade dimensiones de batch y canal (`np.newaxis`).
-        *   Normaliza los píxeles a [0, 1].
-    *   Realiza la inferencia con el modelo OCR (`self.cnn_ocr_model`).
+## 7. Configuración del Sistema
 
-*   **Método `__probs_to_plate`:**
-    *   Remodela la salida del modelo a una matriz (7 caracteres x 37 posibles clases).
-    *   Encuentra el caracter más probable para cada una de las 7 posiciones (`np.argmax`).
-    *   Obtiene la probabilidad máxima para cada posición (`np.max`).
-    *   Mapea los índices predichos a caracteres usando `self.alphabet`.
-    *   Devuelve la lista de caracteres (`plate`) y la lista de sus probabilidades (`probs`).
+La configuración se maneja de varias formas:
 
-## 6. Guardado de Resultados (`alpr/saver.py`)
-
-La clase `SqlSaver` gestiona el almacenamiento de las patentes reconocidas en una base de datos SQLite.
-
-*   **Inicialización (`__init__`):**
-    *   Establece la frecuencia con la que se insertarán datos en la BD (`frequency_insert`).
-    *   Crea la carpeta contenedora de la BD si no existe (`Path(db_path.parent).mkdir`).
-    *   Establece la conexión con la base de datos SQLite (`sqlite3.connect(db_path)`).
-    *   Crea la tabla `plates` si no existe.
-    *   Mantiene un conjunto (`self.unique_plates`) en memoria para almacenar temporalmente las patentes únicas detectadas.
-
-*   **Método `update_in_memory`:**
-    *   Añade las nuevas patentes detectadas (`plates`) al conjunto `self.unique_plates`. Como es un conjunto, las duplicadas se ignoran automáticamente.
-    *   Si el tamaño del conjunto supera `self.frequency_insert`, llama a `insert_in_disk` para escribir los datos en la BD y luego limpia el conjunto (`self.unique_plates.clear()`).
-
-*   **Método `insert_in_disk`:**
-    *   Inserta todas las patentes del conjunto `self.unique_plates` en la tabla `plates` de la base de datos usando `cursor.executemany`.
-    *   Confirma la transacción (`self.conn.commit()`).
-
-*   **Método `__del__` (Destructor):**
-    *   Asegura que cualquier cambio pendiente se guarde (`self.conn.commit()`) y cierra la conexión a la base de datos (`self.conn.close()`) cuando el objeto `ALPR` es destruido.
-
-## 7. Configuración (`config.yaml`)
-
-El archivo `config.yaml` es fundamental, ya que permite ajustar el comportamiento del sistema sin modificar el código. Define parámetros como:
-
-*   Ruta de la fuente de video/imagen.
-*   Modelos específicos de detección y OCR a utilizar.
-*   Umbrales de confianza para la detección y el OCR.
-*   Frecuencia de inferencia en videos.
-*   Configuración de la base de datos (ruta, frecuencia de inserción, si se debe guardar o no).
+*   **`docker-compose.yml`**: Define los servicios, redes, volúmenes y, crucialmente, las **variables de entorno** para cada servicio. Estas variables son la forma principal de configurar parámetros en tiempo de ejecución (ej. URI de MongoDB, claves secretas de Flask, algunos parámetros de los modelos ALPR).
+*   **Interfaz de Administrador en `web-portal`**: Permite la configuración dinámica de:
+    *   Factor de Ajuste por Inflación.
+    *   Tarifas Base de estacionamiento.
+    *   Zona Horaria Operacional.
+    *   Cooldown de Detección de Patentes.
+    *   Período de Gracia para Pagos.
+    Estos ajustes se almacenan en MongoDB a través del `cashier-service`.
+*   **`config.yaml`**: Puede seguir siendo utilizado por `anpr-service` para cargar configuraciones estáticas de los modelos de ALPR si no se sobrescriben por variables de entorno. Su relevancia ha disminuido en favor de la configuración dinámica y por entorno.
 
 ## 8. Conclusión
 
-El sistema integra un modelo de detección de objetos (YOLOv4-tiny) para localizar patentes y un modelo de reconocimiento de caracteres (CNN) para leerlas. El flujo principal gestiona la entrada de datos, orquesta la detección y el OCR a través de la clase `ALPR`, y maneja el guardado de resultados en CSV, imágenes y/o una base de datos SQLite, todo configurable mediante un archivo YAML.
+El sistema ConvALPR es ahora una aplicación robusta y modular basada en microservicios, que no solo realiza el reconocimiento de patentes con alta precisión, sino que también ofrece una gestión completa de estacionamientos, incluyendo un ciclo de vida detallado de sesiones, manejo financiero configurable, y una interfaz web para operación y administración. El uso de Docker y Docker Compose simplifica enormemente su despliegue y mantenimiento.

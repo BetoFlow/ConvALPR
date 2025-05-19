@@ -52,6 +52,8 @@ This document outlines the lifecycle and possible states of a vehicle's parking 
     *   The system proceeds to finalize and close the session.
 *   **Next Possible State(s):** `SESSION_CLOSED`
 
+**Note on Pre-Exit Payment:** If payment occurs while the vehicle is still in the `VEHICLE_ENTERED` (or `VEHICLE_PARKED`) state, before any exit detection, the system may transition to a state like `PAID_AWAITING_EXIT`. This can be considered a variation of `SESSION_PAID_AND_CLOSING` where the exit event is still pending. Upon subsequent exit detection, it would then transition to `SESSION_CLOSED`.
+
 ## 6. `SESSION_UNPAID_TIMEOUT` (Optional State)
 
 *   **Description:** The grace period initiated after `VEHICLE_EXIT_DETECTED` has expired, and no payment confirmation has been received for the session.

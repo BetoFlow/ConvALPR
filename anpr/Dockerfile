@@ -4,6 +4,7 @@ FROM python:3.9-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE 1
 ENV PYTHONUNBUFFERED 1
+ENV PYTHONPATH /app
 
 # Install system dependencies
 # Dependencies for OpenCV
@@ -27,6 +28,8 @@ RUN pip install --no-cache-dir -r requirements.txt pymongo
 # Copy the anpr application code into the container
 # Build context is project root, copy contents of alpr/ directory to /app/
 COPY alpr/. /app/
+# Copy the common module
+COPY common /app/common
 # This will copy alpr.py, service_main.py, models/, etc. into /app/
 # If config.yaml is used by alpr.py, it needs to be handled.
 # For now, assuming alpr.py is adapted to use environment variables for configuration.

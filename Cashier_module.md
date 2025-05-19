@@ -26,6 +26,7 @@ The system must support the following primary vehicle classifications for pricin
 
 * **Code:** CAR\_SUV  
   * **Description:** Standard automobiles (sedans, hatchbacks), and common SUVs (Sport Utility Vehicles), and typically smaller "camionetas" or crossovers that fit into a standard parking space.  
+  * **Default Assignment:** If vehicle type is not automatically detected upon entry, new parking sessions created by the `anpr-service` default to this type (`CAR_SUV`). This can be manually changed later via the web portal if needed.
 * **Code:** TRUCK  
   * **Description:** Larger pickup trucks, vans, and light-to-medium duty trucks that require more space or a different maneuvering radius. This category includes vehicles often referred to as "camiones" (trucks) or larger "camionetas" that may exceed standard car dimensions.  
   * **Pricing Implication:** Generally charged at a higher rate than CAR\_SUV.  
@@ -188,6 +189,31 @@ Once the Total\_Charge is calculated:
 * **Storage:** The INFLATION\_ADJUSTMENT\_FACTOR must be persistently stored (e.g., in a configuration file or database) so it retains its value even after the system restarts.  
 * **Validation:** The UI should implement client-side and server-side validation to ensure the input is a valid positive numeric value.  
 * **Impact:** Upon updating this factor via the UI, all subsequent calculations for parking charges will use the new, adjusted rates immediately.
+
+#### **Additional System Settings (Configurable via Admin UI)**
+
+Beyond financial rates, the following operational parameters are also configurable through the web interface:
+
+*   **Operational Timezone:**
+    *   **Purpose:** Defines the local timezone for the parking facility. Used for displaying timestamps in the web portal and for interpreting manual time inputs (e.g., manual exit times).
+    *   **Configuration:** Settable via a text input in the Admin Settings, allowing any valid tz database timezone string (e.g., "America/Argentina/Buenos_Aires", "UTC").
+    *   **Storage:** Managed by `cashier-service` and fetched by `web-portal` as needed.
+    *   **Default:** UTC.
+
+*   **Plate Detection Cooldown:**
+    *   **Purpose:** Specifies the duration (in seconds) for which subsequent detections of the same license plate by the same camera are ignored to prevent duplicate processing.
+    *   **Configuration:** Settable via a number input in Admin Settings.
+    *   **Storage:** Managed by `cashier-service`.
+    *   **Application:** The `anpr-service` fetches this value at startup and applies it to its detection logic.
+    *   **Important:** Changes to this setting require a restart of the `anpr-service` to take effect.
+    *   **Default:** 300 seconds.
+
+*   **Payment Grace Period:**
+    *   **Purpose:** Defines the time window (in seconds) allowed for payment after a vehicle is detected at an exit (i.e., session state is `AWAITING_PAYMENT_RESOLUTION`).
+    *   **Configuration:** Settable via a number input in Admin Settings.
+    *   **Storage:** Managed by `cashier-service`.
+    *   **Application:** Used by `web-portal` (currently via passive check in the index route) to determine if a session in `AWAITING_PAYMENT_RESOLUTION` should transition to `SESSION_UNPAID_TIMEOUT`.
+    *   **Default:** 300 seconds.
 
 ### **8\. System Status & Monitoring (for Cashier)**
 

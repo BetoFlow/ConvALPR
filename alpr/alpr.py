@@ -5,10 +5,12 @@ import logging
 from timeit import default_timer as timer
 from datetime import datetime, timedelta # Added timedelta
 import uuid 
+from bson import ObjectId # Added for FSM
 
 from detector import PlateDetector
 from ocr import PlateOCR
 from saver import MongoSaver
+from common.session_state_machine import ParkingSessionStateMachine # Simplified import
 
 logger = logging.getLogger(__name__)
 
@@ -111,33 +113,37 @@ class ALPR(MongoSaver):
                     if self.parking_sessions_collection is not None:
                         try:
                             active_session = self.parking_sessions_collection.find_one({
-                                "plate_number": plate_number, "status": "inside" # Query by old status for now
+                                "plate_number": plate_number, "status": "inside" 
                             })
                             if active_session: 
                                 if camera_role == "entry":
                                     logger.warning(f"Plate {plate_number} at ENTRY camera {camera_id} but already 'inside'. Updating last_seen.")
+                                    # With FSM, this might be an event like 're_detect_entry' or just update last_seen
                                     uresult = self.parking_sessions_collection.update_one(
-                                        {"_id": active_session["_id"]}, 
+                                        {"_id": active_session["_id"]},
                                         {"$set": {"last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}}
                                     )
                                     logger.info(f"Last_seen update for {plate_number} ack: {uresult.acknowledged}")
-                                elif camera_role == "exit" or camera_role == "common": # Common can also be an exit
-                                    logger.info(f"Plate {plate_number} EXITING at {camera_role} camera {camera_id}.")
-                                    update_fields = {
-                                        "exit_timestamp": current_frame_timestamp, # This is effectively exit_detected_timestamp
-                                        "exit_image_path": db_image_path, 
-                                        "exit_camera_id": camera_id, 
-                                        # "status": "exited", # Status will be updated by cashier or timeout logic
-                                        "session_state": "AWAITING_PAYMENT_RESOLUTION", # New state
-                                        "last_seen_timestamp": current_frame_timestamp, 
-                                        "last_seen_camera_id": camera_id
-                                    }
-                                    uresult = self.parking_sessions_collection.update_one(
-                                        {"_id": active_session["_id"]}, 
-                                        {"$set": update_fields}
+                                elif camera_role == "exit" or camera_role == "common":
+                                    logger.info(f"Plate {plate_number} EXITING at {camera_role} camera {camera_id}. Processing via FSM.")
+                                    session_fsm = ParkingSessionStateMachine.load_session(
+                                        session_id_str=str(active_session["_id"]),
+                                        mongo_collection=self.parking_sessions_collection
                                     )
-                                    logger.info(f"Exit update for {plate_number} ack: {uresult.acknowledged}")
+                                    if session_fsm:
+                                        exit_event_data = {
+                                            "exit_timestamp": current_frame_timestamp,
+                                            "exit_image_path": db_image_path,
+                                            "exit_camera_id": camera_id,
+                                            "last_seen_timestamp": current_frame_timestamp,
+                                            "last_seen_camera_id": camera_id
+                                        }
+                                        session_fsm.trigger_event('event_detect_exit', **exit_event_data)
+                                        logger.info(f"Exit event processed by FSM for {plate_number}. New state: {session_fsm.state}")
+                                    else:
+                                        logger.error(f"Failed to load FSM for existing session {active_session['_id']}")
                                 elif camera_role == "monitoring":
+                                    # With FSM, this might be an event like 'detect_monitoring' or just update last_seen
                                     uresult = self.parking_sessions_collection.update_one(
                                         {"_id": active_session["_id"]}, 
                                         {"$set": {"last_seen_timestamp": current_frame_timestamp, "last_seen_camera_id": camera_id}}
@@ -147,26 +153,39 @@ class ALPR(MongoSaver):
                             else: # No active session, potential new entry
                                 if camera_role == "exit":
                                     logger.warning(f"Plate {plate_number} at EXIT camera {camera_id} but no active session found.")
-                                    # Optionally create a session with only exit data if policy dictates
+                                    # Optionally create a session with only exit data if policy dictates (FSM could handle this with a specific event)
                                 else: # Entry or Common camera, create new session
-                                    logger.info(f"Plate {plate_number} ENTERING at {camera_role} camera {camera_id}.")
-                                    new_session = {
-                                        "plate_number": plate_number, 
-                                        "entry_timestamp": current_frame_timestamp, 
-                                        "entry_image_path": db_image_path, 
-                                        "entry_camera_id": camera_id, 
-                                        "exit_timestamp": None, 
-                                        "exit_image_path": None, 
-                                        "exit_camera_id": None, 
-                                        "status": "inside", # Keep for compatibility
-                                        "session_state": "VEHICLE_ENTERED", # New state
+                                    logger.info(f"Plate {plate_number} ENTERING at {camera_role} camera {camera_id}. Creating new session via FSM.")
+                                    
+                                    new_session_id = ObjectId()
+                                    session_fsm = ParkingSessionStateMachine(
+                                        session_id=new_session_id,
+                                        initial_state='INIT', 
+                                        mongo_collection=self.parking_sessions_collection,
+                                        session_data={} 
+                                    )
+                                    
+                                    entry_event_data = {
+                                        "plate_number": plate_number,
+                                        "entry_timestamp": current_frame_timestamp,
+                                        "entry_image_path": db_image_path,
+                                        "entry_camera_id": camera_id,
+                                        "vehicle_type": "CAR_SUV", 
                                         "last_seen_timestamp": current_frame_timestamp, 
-                                        "last_seen_camera_id": camera_id,
-                                        "vehicle_type": None,
-                                        "payment_status": "unpaid"
+                                        "last_seen_camera_id": camera_id
                                     }
-                                    iresult = self.parking_sessions_collection.insert_one(new_session)
-                                    logger.info(f"Parking session for {plate_number} created. Ack: {iresult.acknowledged}")
+                                    
+                                    session_fsm.trigger_event('event_detect_entry', **entry_event_data)
+                                    
+                                    initial_session_doc_to_insert = {
+                                        "_id": new_session_id,
+                                        "session_state": session_fsm.state, 
+                                        "last_state_update_timestamp": datetime.utcnow(),
+                                        **session_fsm.session_data 
+                                    }
+                                    
+                                    iresult = self.parking_sessions_collection.insert_one(initial_session_doc_to_insert)
+                                    logger.info(f"Parking session for {plate_number} (ID: {new_session_id}) created via FSM. State: {session_fsm.state}. Ack: {iresult.acknowledged}")
                                     parking_logic_processed = True
                         except Exception as e_parking:
                             logger.error(f"Error during parking logic for {plate_number}: {e_parking}", exc_info=True)

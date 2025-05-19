@@ -1,167 +1,165 @@
-# ConvALPR
+# ConvALPR: Sistema Multi-Servicio de Reconocimiento Automático de Patentes y Gestión de Estacionamiento
 
 [![Alt Text](assets/alpr.gif)](https://youtu.be/-TPJot7-HTs?t=652)
 
-**ConvALPR** es un Reconocedor Automatico de Patentes Vehiculares, que utiliza **Redes Neuronales Convolucionales**. A
-diferencia de metodos tradicionales, este approach puede reconocer patentes con obstrucciones/diferencia de
-brillo/letras borrosas, etc. ConvALPR consiste de dos procesos: **localizar** (detector de objetos) y **reconocedor** (
-Reconocimiento Optico de Caracteres). Ambas usan solamente **Redes Convolucionales/ConvNets/CNNs**.
+**ConvALPR** es un sistema avanzado de Reconocimiento Automático de Patentes Vehiculares (ANPR) que utiliza **Redes Neuronales Convolucionales (CNNs)**. A diferencia de métodos tradicionales, este enfoque permite reconocer patentes incluso con obstrucciones, diferencias de brillo, o caracteres borrosos.
+
+Originalmente enfocado en los procesos de **localización** (detector de objetos) y **reconocimiento** (OCR) de patentes, ConvALPR ha evolucionado a un **sistema integral multi-servicio** para la gestión de estacionamientos. Este sistema incluye un portal web para visualización y administración, un módulo de caja para la gestión financiera, y se despliega fácilmente mediante **Docker Compose**.
 
 ![Proceso ALPR](assets/proceso.png)
 
-## Localizador
+## Arquitectura del Sistema
+
+La aplicación utiliza una arquitectura de microservicios orquestada por Docker Compose. Consiste en los siguientes servicios principales:
+
+*   **`anpr-service`**: Motor central para el procesamiento de video, detección y reconocimiento de patentes (TensorFlow), lógica inicial de sesiones de estacionamiento, y guardado de datos en MongoDB.
+*   **`cashier-service`**: Gestiona configuraciones financieras (tarifas, inflación, período de gracia), calcula cargos de estacionamiento, y registra pagos. También almacena configuraciones operativas (zona horaria, cooldown de detección).
+*   **`web-portal`**: Aplicación web Flask que provee la interfaz de usuario para visualización de sesiones y detecciones, carga de videos, gestión de cámaras, administración de usuarios y configuración del sistema.
+*   **`mongodb`**: Base de datos NoSQL central para todos los datos de la aplicación.
+*   **`mongo-express`**: Interfaz web administrativa para MongoDB.
+
+## Características Principales
+
+*   **Despliegue Sencillo con Docker Compose**: Todo el sistema se levanta con un solo comando.
+*   **ANPR en Tiempo Real**: Procesamiento de múltiples fuentes de video concurrentes.
+*   **Modelos Avanzados**: Utiliza modelos basados en TensorFlow (YOLOv4-tiny para detección, CNNs personalizadas para OCR).
+*   **Gestión Integral de Estacionamiento**:
+    *   Seguimiento de entrada/salida de vehículos.
+    *   Ciclo de vida detallado de sesiones de estacionamiento (`VEHICLE_ENTERED`, `AWAITING_PAYMENT_RESOLUTION`, `PAID_AWAITING_EXIT`, `SESSION_UNPAID_TIMEOUT`, `SESSION_CLOSED`).
+    *   Tipo de vehículo por defecto: `CAR_SUV` para nuevas sesiones.
+*   **Portal Web Interactivo (`web-portal`)**:
+    *   Visualización de sesiones de estacionamiento y detecciones crudas (con timestamps localizados).
+    *   Imágenes de detección clickeables para vista en tamaño completo.
+    *   Página dedicada para el registro de detecciones crudas con funcionalidad de búsqueda por patente.
+    *   Carga de videos para procesamiento bajo demanda.
+    *   Gestión de cámaras y fuentes de video persistentes.
+    *   Autenticación de usuarios y roles (admin, supervisor, técnico, operador).
+    *   Edición de sesiones y gestión de usuarios según roles.
+*   **Módulo de Caja y Configuración Financiera (`cashier-service` y Admin UI)**:
+    *   Configuración de Factor de Ajuste por Inflación.
+    *   Configuración de Tarifas Base (por tipo de vehículo y modalidad: horaria, diaria, nocturna, abonos).
+    *   Cálculo de cargos de estacionamiento.
+    *   Procesamiento de pagos (simulado o integrado).
+*   **Configuraciones Operativas (Admin UI)**:
+    *   Zona Horaria Operacional.
+    *   Cooldown para Detección de Patentes (requiere reinicio de `anpr-service`).
+    *   Período de Gracia para Pagos.
+*   **Base de Datos Centralizada**: MongoDB para persistencia de datos, accesible vía Mongo Express.
+
+## Cómo Usarlo (Aplicación Multi-Servicio con Docker)
+
+### Requisitos Previos
+
+*   **Docker**: [Instrucciones de instalación](https://docs.docker.com/get-docker/)
+*   **Docker Compose**: Generalmente se instala con Docker. [Instrucciones](https://docs.docker.com/compose/install/)
+
+### Instalación y Ejecución
+
+1.  **Clonar el Repositorio (si aún no lo has hecho):**
+    ```bash
+    git clone <URL_DEL_REPOSITORIO>
+    cd ConvALPR 
+    ```
+2.  **Construir e Iniciar los Servicios con Docker Compose:**
+    Desde la raíz del proyecto (`ConvALPR/`), ejecuta:
+    ```bash
+    docker compose up --build -d
+    ```
+    Este comando construirá las imágenes de los servicios (si es la primera vez o si hay cambios en los Dockerfiles) y luego iniciará todos los contenedores en segundo plano (`-d`).
+
+### Acceso a los Servicios
+
+*   **Portal Web Principal (`web-portal`)**:
+    *   URL: `http://localhost:5000`
+    *   Credenciales de administrador por defecto: `admin` / `admin` (se recomienda cambiarla).
+*   **Mongo Express (Administración de Base de Datos)**:
+    *   URL: `http://localhost:8081`
+
+### Configuración del Sistema
+
+La configuración principal del sistema se realiza a través de:
+
+1.  **Variables de Entorno**: Definidas en el archivo `docker-compose.yml` para cada servicio. Estas controlan aspectos como la URI de MongoDB, claves secretas, y parámetros de los modelos de ANPR.
+2.  **Interfaz de Configuración de Administrador (en el Portal Web)**:
+    *   Una vez logueado como administrador en `http://localhost:5000`, navega a "Admin Settings".
+    *   Desde aquí puedes configurar:
+        *   Factor de Ajuste por Inflación.
+        *   Tarifas Base para diferentes tipos de vehículos y modalidades.
+        *   Zona Horaria Operacional del sistema.
+        *   Tiempo de Cooldown para la detección de patentes (requiere reinicio del `anpr-service`).
+        *   Período de Gracia para pagos.
+3.  **`config.yaml`**: Este archivo (ubicado en la raíz) aún puede ser utilizado por el `anpr-service` para parámetros específicos de los modelos de detección y OCR que no se configuran por variables de entorno.
+
+---
+
+## Componentes Individuales de ALPR (Para Desarrollo y Pruebas)
+
+Las siguientes secciones describen cómo probar los componentes de localización y OCR de forma aislada, utilizando scripts de Python. Esto es útil para desarrollo o pruebas específicas de los modelos de ALPR, pero **no es la forma de ejecutar la aplicación completa**.
+
+### Instalar Dependencias (para scripts individuales)
+
+Se recomienda utilizar un entorno virtual.
+
+1.  **Crear un entorno virtual:** `python3 -m venv .venv`
+2.  **Activar el entorno virtual:**
+    *   Linux/macOS: `source .venv/bin/activate`
+    *   Windows: `.\.venv\Scripts\activate`
+3.  **Instalar las dependencias:** `pip install -r requirements.txt`
+    (Para GPU, asegúrate de tener los [requisitos de TensorFlow para GPU](https://www.tensorflow.org/install/gpu#software_requirements) antes).
+
+### Localizador (Detector de Patentes)
 
 ![Demo yolo v4 tiny](assets/demo_localizador.gif)
 
-Para el **localizador** se usa yolo
-v4 **[tiny](https://github.com/AlexeyAB/darknet#yolo-v4-v3-and-v2-for-windows-and-linux)**, para lograr que el detector
-corra en **tiempo real**. Este detector de objetos se entreno con patentes (ni una sola de Argentina) aun asino tiene
-problemas en localizarlas con alta precision. Mas detalles de entrenamiento del
-detector **[aca](https://github.com/ankandrew/LocalizadorPatentes)**. Se convirtieron los parametros de framework
-Darknet a TensorFlow usando este **[repo](https://github.com/hunglc007/tensorflow-yolov4-tflite)**.
+Utiliza YOLOv4-tiny. Modelos en [`alpr/models/detection`](alpr/models/detection/) con resoluciones de entrada de {*384x384*, *512x512*, *608x608*}.
 
-En este repo se pueden encontrar **3** versiones del localizador de patentes, misma arquitectura (**yolo v4 tiny sin
-spp**), pero con distinta resolucion de entrada. Los modelos usan res. de entrada de {*384x384*, *512x512*, *608x608*},
-donde a mayor la resolucion **mayor es la precision** (y puede detectar mejor patentes alejadas) pero mayor es el tiempo
-de inferencia (es **mas lento**). Estos modelos se encuentran [`alpr/models/detection`](alpr/models/detection/)
-
-## Reconocedor (ROC/OCR)
-
-![Demo yolo v4 tiny](https://github.com/ankandrew/cnn-ocr-lp/blob/master/extra/demo.gif)
-
-Para el **reconocedor de caracteres** [OCR](https://es.wikipedia.org/wiki/Reconocimiento_%C3%B3ptico_de_caracteres) de
-las patentes, se diseñaron unos modelos personalizados en TensorFlow Keras.
-
-En este repositorio se pueden encontrar los mismos modelos que [aca](https://github.com/ankandrew/cnn-ocr-lp). Estos
-modelos se pueden encontrar tambien en [`alpr/models/ocr`](alpr/models/ocr/), y los modelos que tienen `_CPU` al final
-esta mejor optimizados para CPU y corren mas rapido en el procesador.
-
-## Como usarlo
-
-### Instalar dependencias
-
-Se recomienda utilizar un entorno virtual para evitar conflictos con paquetes del sistema.
-
-1.  **Crear un entorno virtual:**
-    ```bash
-    python3 -m venv .venv
-    ```
-    *(Esto creará un directorio llamado `.venv` en la raíz del proyecto)*
-
-2.  **Activar el entorno virtual:**
-    *   En Linux/macOS:
-        ```bash
-        source .venv/bin/activate
-        ```
-    *   En Windows (Git Bash):
-        ```bash
-        source .venv/Scripts/activate
-        ```
-    *   En Windows (CMD/PowerShell):
-        ```bash
-        .\.venv\Scripts\activate
-        ```
-    *(Deberías ver `(.venv)` al principio de la línea de comandos indicando que el entorno está activo)*
-
-3.  **Instalar las dependencias:**
-    Una vez activado el entorno, instala los paquetes necesarios:
-    ```bash
-    pip install -r requirements.txt
-    ```
-
-Para correr con la **placa de video/GPU** y acelerar la inferencia, asegúrate de tener los **[requerimientos de software de TensorFlow para GPU](https://www.tensorflow.org/install/gpu#software_requirements)** instalados *antes* de instalar las dependencias de Python. Luego, instala las dependencias como se indicó en el paso 3.
-
-### Visualizar solo localizador
-
-Para probar el **localizador/detector** de patentes (**sin OCR, solo los bounding boxes**) y visualizar las predicciones
-se usa el comando:
-
-```
+**Para probar solo el localizador (sin OCR):**
+```bash
 python detector_demo.py --fuente-video /path/a/tu/video.mp4 --mostrar-resultados --input-size 608
 ```
 
-*Intenta con los distintos modelos {608, 512, 384} para ver cual se ajusta mejor a tu caso*
+### Reconocedor (OCR)
 
-## Reconocedor Automatico
+![Demo OCR](https://github.com/ankandrew/cnn-ocr-lp/blob/master/extra/demo.gif)
 
-### Config
+Modelos personalizados en TensorFlow Keras, ubicados en [`alpr/models/ocr`](alpr/models/ocr/).
 
-La **configuracion** del [ALPR](https://es.wikipedia.org/wiki/Reconocimiento_autom%C3%A1tico_de_matr%C3%ADculas) se
-puede encontrar en [`config.yaml`](config.yaml). Este contiene los ajustes del Reconocedor y Localizador. Las distintas
-opciones estan descriptas en el mismo archivo (que hacen). El modelo de OCR es **independiente** del detector de
-objetos, y cualquiera deberia funcionar bien con cualquiera. Ejemplo para correr en la CPU y *priorizar velocidad*, se
-puede elegir el modelo 3 o 4 y el detector 384. Si se prefiere **mayor precision** se puede elegir el detector con res.
-de entrada 608 y OCR 1 o 2.
+### Scripts de Prueba del ALPR Completo (Localizador + OCR)
 
-### Ejemplo visualizar ALPR
+*   **Ejemplo para visualizar predicciones ALPR (sin guardar en DB):**
+    ```bash
+    python reconocedor_automatico.py --cfg config.yaml --demo
+    ```
+*   **Ejemplo para procesar y guardar en DB (sin visualizar):**
+    ```bash
+    python reconocedor_automatico.py --cfg config.yaml
+    ```
+    *(Nota: Este script guarda en una base de datos SQLite local, no en el MongoDB usado por la aplicación Dockerizada).*
 
-```
-python reconocedor_automatico.py --cfg config.yaml --demo
-```
+---
 
-### Guarda en Base de Datos sin visualizar
+## Notas Adicionales
 
-```
-python reconocedor_automatico.py --cfg config.yaml
-```
+*   **Reconocedor OCR para Argentina**: Si bien el localizador puede funcionar con patentes de diversos países, el modelo OCR actual está entrenado principalmente para patentes de Argentina. Para otros formatos, se requeriría reentrenamiento o un modelo OCR diferente.
+*   *Este trabajo forma parte de un proyecto integrador para la Universidad.*
 
-## Python API
+## TODO (Revisado)
 
-Para usarlo en tu proyecto podes leer de config o cread un dict, es lo mismo:
-
-### Forma #1 (cfg)
-
-```python
-from alpr.alpr import ALPR
-import cv2
-import yaml
-
-im = cv2.imread('assets/prueba.jpg')
-with open('config.yaml', 'r') as stream:
-    cfg = yaml.safe_load(stream)
-alpr = ALPR(cfg['modelo'], cfg['db'])
-predicciones = alpr.predict(im)
-print(predicciones)
-```
-
-### Forma #2 (dict)
-
-```python
-from alpr.alpr import ALPR
-import cv2
-
-im = cv2.imread('assets/prueba.jpg')
-alpr = ALPR(
-    {
-        'resolucion_detector': 512,
-        'confianza_detector': 0.25,
-        'numero_modelo_ocr': 2,
-        'confianza_avg_ocr': .4,
-        'confianza_low_ocr': .35
-    },
-    {
-        'guardar': True,
-        'insert_frequency': 5,
-        'path': 'test_db/plates_asd.db'
-    }
-)
-predicciones = alpr.predict(im)
-print(predicciones)
-```
-
-### Notas
-
-* **Aclaracion**: Si bien el **localizador** funciona para patentes de cualquier pais el **reconocedor** actual esta
-  hecho especialmente para **Argentina**,
-  si queres **entrenar uno [personalizado](https://github.com/ankandrew/cnn-ocr-lp/wiki/Entrenamiento)**
-
-* *Este trabajo forma parte de un proyecto integrador para la Universidad*
-
-## TODO
-
-- [ ] Ampliar modelos OCR
-- [ ] Compilar para EdgeTPU
-- [ ] Quantizar a FP16
-- [ ] Quantizar a INT8
-- [ ] Optimizar
-- [ ] Aumentar `batch` de OCR
+*   [ ] **Módulo de Caja**:
+    *   [ ] Implementar lógica de cálculo para modalidades `NIGHTLY` y `LONG-TERM` en `cashier-service`.
+    *   [ ] Implementar gestión de `ABONO_MENSUAL` (lookup de abonados, cargo cero).
+    *   [ ] UI para gestión de abonados.
+*   [ ] **ANPR Service**:
+    *   [ ] Considerar mecanismo para actualizar cooldown de detección sin reiniciar el servicio.
+*   [ ] **Web Portal**:
+    *   [ ] Implementar UI para búsqueda de Sesiones de Estacionamiento por patente.
+    *   [ ] Implementar columnas ordenables en tablas.
+    *   [ ] Mejorar la gestión de errores y feedback al usuario.
+    *   [ ] Funcionalidades de reporte y estadísticas.
+*   [ ] **Modelos ALPR**:
+    *   [ ] Ampliar modelos OCR para mayor robustez o diferentes formatos de patente.
+    *   [ ] Optimización de modelos (quantización FP16/INT8, compilación EdgeTPU).
+*   [ ] **General**:
+    *   [ ] Pruebas unitarias y de integración exhaustivas.
+    *   [ ] Documentación de API para `cashier-service`.
+    *   [ ] Mejorar la seguridad (ej. gestión de secrets, revisión de permisos).

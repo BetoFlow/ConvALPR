@@ -5,19 +5,25 @@ FROM python:3.9-slim
 WORKDIR /app
 
 # Copy the requirements file into the container at /app
-COPY requirements.txt .
+# Context is project root
+COPY cashier_service/requirements.txt /app/requirements.txt
 
 # Install any needed packages specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code into the container at /app
-COPY . .
+# Copy the cashier_service application code into the container at /app
+# Context is project root
+COPY cashier_service/. /app/
+
+# Copy the common module from the project root
+COPY common /app/common
 
 # Make port 5001 available to the world outside this container (if cashier service runs on 5001)
 # This will be mapped in docker-compose.yml
 EXPOSE 5001
 
 # Define environment variables (can be overridden by docker-compose)
+ENV PYTHONPATH /app
 ENV FLASK_APP=app.py
 ENV FLASK_RUN_HOST=0.0.0.0
 ENV FLASK_RUN_PORT=5001
